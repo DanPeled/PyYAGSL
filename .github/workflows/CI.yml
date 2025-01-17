@@ -1,0 +1,36 @@
+name: SwerveLib CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.10'
+
+    - name: Install RobotPy and dependencies
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install robotpy
+        python3 -m robotpy sync
+
+    - name: Install Ruff (Python linter)
+      run: |
+        python3 -m pip install ruff
+        ruff check .
+    - name: Install Pyright (Python type checker)
+      run: |
+        npm install -g pyright
+        pyright 
+    - name: Check Python files with compileall
+      run: |
+        python3 -m compileall . 
