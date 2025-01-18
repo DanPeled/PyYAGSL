@@ -1,4 +1,3 @@
-from sys import is_stack_trampoline_active, setdlopenflags
 from typing import Final, Optional
 from wpimath.geometry import Rotation2d
 from wpimath.units import (
@@ -10,7 +9,6 @@ from wpimath.units import (
     rotationsToDegrees,
     volts,
 )
-import numpy as np
 from wpimath.kinematics import SwerveModulePosition, SwerveModuleState
 from wpilib import Alert
 from wpimath.controller import SimpleMotorFeedforwardMeters
@@ -20,7 +18,7 @@ from swervelib.math import SwerveMath
 from swervelib.motors import SwerveMotor
 from swervelib.parser.cache import Cache
 from swervelib.parser.moduleConfig import SwerveModuleConfiguration
-from swervelib.parser.pidf import PIDFConfig, PIDFRange
+from swervelib.parser.pidf import PIDFConfig
 from swervelib.simDevices import SwerveModuleSimulation
 from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity
 
