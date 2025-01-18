@@ -14,7 +14,7 @@ from wpimath.kinematics import ChassisSpeeds, SwerveModuleState
 from wpilib import Timer
 
 
-class TelemtryVerbosity(Enum):
+class TelemetryVerbosity(Enum):
     NONE = 0
     LOW = 1
     INFO = 2
@@ -196,7 +196,7 @@ class SwerveDriveTelemetry:
 
     robotRotationObj: Rotation2d = Rotation2d()
 
-    verbosity: TelemtryVerbosity = TelemtryVerbosity.MACHINE
+    verbosity: TelemetryVerbosity = TelemetryVerbosity.MACHINE
 
     isSimulation: bool = RobotBase.isSimulation()
 

@@ -1,4 +1,12 @@
-from wpimath.geometry import Rotation2d, Translation3d
+from typing import Final
+from wpimath.geometry import (
+    Pose2d,
+    Rotation2d,
+    Translation2d,
+    Translation3d,
+    Twist2d,
+)
+from wpimath.kinematics import ChassisSpeeds, SwerveModuleState
 from wpimath.units import (
     kilograms,
     meters,
@@ -7,9 +15,15 @@ from wpimath.units import (
     meters_per_second,
     meters_per_second_squared,
     newton_meters,
+    radians,
+    seconds,
 )
 from wpimath.controller import SimpleMotorFeedforwardMeters
 import numpy as np
+
+from swervelib.parser.moduleConfig import SwerveModuleConfiguration
+from swervelib.parser.swerve import SwerveDriveConfiguration
+from swervelib.swerve import SwerveModule
 
 
 class Matter:
@@ -55,9 +69,9 @@ class SwerveMath:
         wheelGripCoefficientOfFriction: float,
     ) -> SimpleMotorFeedforwardMeters:
         kv: float = optimalVoltage / maxSpeed
-        ka: float = optimalVoltage / SwerveMath.calculateMaxAcceleration(
-            wheelGripCoefficientOfFriction
-        )
+        # ka: float = optimalVoltage / SwerveMath.calculateMaxAcceleration(
+        #     wheelGripCoefficientOfFriction
+        # )
 
         return SimpleMotorFeedforwardMeters(0, kv, 0)
 
@@ -87,3 +101,87 @@ class SwerveMath:
     def calcMaxTippingAccel(
         angle: Rotation2d, matter: list[Matter], robotMass: kilograms, config
     ): ...  # TODO (waiting for config class)
+
+    @staticmethod
+    def poseLog(transform: Pose2d) -> Twist2d:
+        kEps: Final[float] = 1e-9
+        dtheta: Final[radians] = transform.rotation().radians()
+        half_dtheta: Final[radians] = dtheta * 0.5
+        cos_minus_one: Final[float] = transform.rotation().cos() - 1.0
+        halftheta_by_tan_of_halfdtheta: float
+
+        if np.abs(cos_minus_one) < kEps:
+            halftheta_by_tan_of_halfdtheta = 1.0 - (1.0 / 12.0 * dtheta * dtheta)
+        else:
+            halftheta_by_tan_of_halfdtheta = (
+                -(half_dtheta * transform.rotation().sin()) / cos_minus_one
+            )
+        translation_part: Final[Translation2d] = transform.translation().rotateBy(
+            Rotation2d(halftheta_by_tan_of_halfdtheta, -half_dtheta)
+        )
+
+        return Twist2d(translation_part.X(), translation_part.Y(), dtheta)
+
+    @staticmethod
+    def limitVelocity(
+        commandedVelocity: Translation2d,
+        fieldVelocity: ChassisSpeeds,
+        robotPose: Pose2d,
+        loopTime: seconds,
+        robotMass: kilograms,
+        matter: list[Matter],
+        config: SwerveDriveConfiguration,
+    ) -> Translation2d: ...  # TODO waiting for SwerveController class
+
+    @staticmethod
+    def getSwerveModuleConfig(
+        modules: list[SwerveModule], front: bool, left: bool
+    ) -> SwerveModuleConfiguration:
+        target: Translation2d = modules[0].configuration.moduleLocation
+        current: Translation2d
+        temp: Translation2d
+        configuration: SwerveModuleConfiguration = modules[0].configuration
+
+        for module in modules:
+            current = module.configuration.moduleLocation
+            if front:
+                temp = current if target.Y() >= current.Y() else target
+            else:
+                temp = current if target.Y() <= current.Y() else target
+
+            if left:
+                target = temp if target.X() >= temp.X() else target
+            else:
+                target = temp if target.X() <= temp.X() else target
+
+            configuration = module.configuration if current == target else configuration
+
+        return configuration
+
+    @staticmethod
+    def placeInAppropriate0To360Scope(
+        scopeReference: degrees, newAngle: degrees
+    ) -> degrees:
+        diffRevs: degrees = np.round((scopeReference - newAngle) / 360) * 360
+        return diffRevs + newAngle
+
+    @staticmethod
+    def antiJitter(
+        moduleState: SwerveModuleState,
+        lastModuleState: SwerveModuleState,
+        maxSpeed: float,
+    ) -> None:
+        if np.abs(moduleState.speed) <= (maxSpeed * 0.01):
+            moduleState.angle = lastModuleState.angle
+
+    @staticmethod
+    def cubeTranslation(translation: Translation2d) -> Translation2d:
+        if np.hypot(translation.X(), translation.Y()) <= 1.0e-6:
+            return translation
+        return Translation2d(translation.norm() ** 3, translation.angle())
+
+    @staticmethod
+    def scaleTranslation(translation: Translation2d, scalar: float) -> Translation2d:
+        if np.hypot(translation.X(), translation.Y()) <= 1.0e-6:
+            return translation
+        return Translation2d(translation.norm() * scalar, translation.angle())
