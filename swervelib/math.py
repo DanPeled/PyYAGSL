@@ -1,4 +1,4 @@
-from typing import Final
+from typing import Final, Optional
 from wpimath.geometry import (
     Pose2d,
     Rotation2d,
@@ -100,7 +100,60 @@ class SwerveMath:
     @staticmethod
     def calcMaxTippingAccel(
         angle: Rotation2d, matter: list[Matter], robotMass: kilograms, config
-    ): ...  # TODO (waiting for config class)
+    ):
+        centerMass: Translation3d = Translation3d()
+        for obj in matter:
+            centerMass += obj.massMoment()
+        robotCG: Translation3d = centerMass / robotMass
+        horizontalCG: Translation2d = robotCG.toTranslation2d()
+
+        projectedHorizontalCg: Translation2d = Translation2d(
+            (angle.sin() * angle.cos() * horizontalCG.Y())
+            + ((angle.cos() ** 2) * horizontalCG.X()),
+            (angle.sin() * angle.cos() * horizontalCG.X())
+            + ((angle.sin() ** 2) * horizontalCG.Y()),
+        )
+
+        # Projects the edge of the wheelbase onto the direction line.  Assumes the wheelbase is
+        # rectangular.
+        # Because a line is being projected, rather than a point, one of the coordinates of the
+        # projected point is
+        # already known.
+        projectedWheelbaseEdge: Optional[Translation2d] = None
+        angDeg: degrees = angle.degrees()
+        if 45 >= angDeg >= -45:
+            conf: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+                config.modules, True, True
+            )
+            projectedWheelbaseEdge = Translation2d(
+                conf.moduleLocation.X(), conf.moduleLocation.X() * angle.tan()
+            )
+        elif 135 >= angDeg > 45:
+            conf: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+                config.modules, True, True
+            )
+            projectedWheelbaseEdge = Translation2d(
+                conf.moduleLocation.Y() / angle.tan(), conf.moduleLocation.Y()
+            )
+        elif -135 <= angDeg < -45:
+            conf: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+                config.modules, True, False
+            )
+            projectedWheelbaseEdge = Translation2d(
+                conf.moduleLocation.Y() / angle.tan(), conf.moduleLocation.Y()
+            )
+        else:
+            conf: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+                config.modules, False, True
+            )
+            projectedWheelbaseEdge = Translation2d(
+                conf.moduleLocation.X(), conf.moduleLocation.X() * angle.tan()
+            )
+        horizontalDistance: float = (
+            projectedHorizontalCg + projectedWheelbaseEdge
+        ).norm()
+
+        return 9.81 * horizontalDistance / robotCG.Z()
 
     @staticmethod
     def poseLog(transform: Pose2d) -> Twist2d:
