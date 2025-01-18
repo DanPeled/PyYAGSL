@@ -1,7 +1,7 @@
 from typing import Final, Optional
 import numpy as np
 from wpimath.filter import SlewRateLimiter
-from wpimath.geometry import Rotation2d, Rotation3d, Translation2d
+from wpimath.geometry import Rotation2d, Translation2d
 from wpimath.units import (
     inchesToMeters,
     meters_per_second,
@@ -13,14 +13,11 @@ from wpimath.units import (
     radians,
 )
 from wpimath.kinematics import (
-    SwerveDrive4Kinematics,
     SwerveModulePosition,
     SwerveModuleState,
     ChassisSpeeds,
 )
-import threading as thrd
-from wpimath.estimator import SwerveDrive4PoseEstimator
-from wpilib import Alert, Notifier
+from wpilib import Alert
 from wpimath.controller import PIDController, SimpleMotorFeedforwardMeters
 from ntcore import BooleanPublisher, DoublePublisher, NetworkTableInstance
 from swervelib.encoders import SwerveAbsoluteEncoder
@@ -31,7 +28,6 @@ from swervelib.parser.moduleConfig import SwerveModuleConfiguration
 from swervelib.parser.pidf import PIDFConfig
 from swervelib.parser.swerve import (
     SwerveControllerConfiguration,
-    SwerveDriveConfiguration,
 )
 from swervelib.simDevices import SwerveModuleSimulation
 from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity
