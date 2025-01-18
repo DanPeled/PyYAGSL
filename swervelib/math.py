@@ -78,7 +78,7 @@ class SwerveMath:
     @staticmethod
     def calculateMaxAngularVelocity(
         maxSpeed: meters_per_second, furthestModuleX: meters, furthestModuleY: meters
-    ):
+    ) -> float:
         return maxSpeed / (np.hypot(furthestModuleX, furthestModuleY))
 
     @staticmethod

@@ -1,5 +1,7 @@
 from typing import Final, Optional
-from wpimath.geometry import Rotation2d
+import numpy as np
+from wpimath.filter import SlewRateLimiter
+from wpimath.geometry import Rotation2d, Rotation3d, Translation2d
 from wpimath.units import (
     inchesToMeters,
     meters_per_second,
@@ -8,10 +10,18 @@ from wpimath.units import (
     radiansToRotations,
     rotationsToDegrees,
     volts,
+    radians,
 )
-from wpimath.kinematics import SwerveModulePosition, SwerveModuleState
-from wpilib import Alert
-from wpimath.controller import SimpleMotorFeedforwardMeters
+from wpimath.kinematics import (
+    SwerveDrive4Kinematics,
+    SwerveModulePosition,
+    SwerveModuleState,
+    ChassisSpeeds,
+)
+import threading as thrd
+from wpimath.estimator import SwerveDrive4PoseEstimator
+from wpilib import Alert, Notifier
+from wpimath.controller import PIDController, SimpleMotorFeedforwardMeters
 from ntcore import BooleanPublisher, DoublePublisher, NetworkTableInstance
 from swervelib.encoders import SwerveAbsoluteEncoder
 from swervelib.math import SwerveMath
@@ -19,6 +29,10 @@ from swervelib.motors import SwerveMotor
 from swervelib.parser.cache import Cache
 from swervelib.parser.moduleConfig import SwerveModuleConfiguration
 from swervelib.parser.pidf import PIDFConfig
+from swervelib.parser.swerve import (
+    SwerveControllerConfiguration,
+    SwerveDriveConfiguration,
+)
 from swervelib.simDevices import SwerveModuleSimulation
 from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity
 
@@ -482,3 +496,129 @@ class SwerveModule:
             cosineScalar = 1.0
 
         return desiredState.speed * cosineScalar
+
+
+class SwerveController:
+    def __init__(self, cfg: SwerveControllerConfiguration):
+        self.config: Final[SwerveControllerConfiguration] = cfg
+        self.thetaController: Final[PIDController] = (
+            cfg.headingPIDF.createPIDController()
+        )
+        self.lastAngleScalar: float = 0
+        self.xLimiter: Optional[SlewRateLimiter] = None
+        self.yLimiter: Optional[SlewRateLimiter] = None
+        self.angleLimiter: Optional[SlewRateLimiter] = None
+
+    def getTranslation2d(self, speeds: ChassisSpeeds) -> Translation2d:
+        return Translation2d(speeds.vx, speeds.vy)
+
+    def addSlewRateLimiters(
+        self, x: SlewRateLimiter, y: SlewRateLimiter, angle: SlewRateLimiter
+    ) -> None:
+        self.xLimiter = x
+        self.yLimiter = y
+        self.angleLimiter = angle
+
+    def withinHypotDeadband(self, x: float, y: float) -> bool:
+        return np.hypot(x, y) < self.config.angleJoystickRadiusDeadband
+
+    def getTargetSpeedsWithAngle(
+        self,
+        xInput: float,
+        yInput: float,
+        angle: float,
+        currentHeadingAngle: radians,
+        maxSpeed: meters_per_second,
+    ) -> ChassisSpeeds:
+        x: float = xInput * maxSpeed
+        y: float = yInput * maxSpeed
+
+        return self.getRawTargetSpeedsWithConstantHeading(
+            x, y, angle, currentHeadingAngle
+        )
+
+    def getJoystickAngle(self, headingX: float, headingY: float) -> float:
+        self.lastAngleScalar = (
+            self.lastAngleScalar
+            if self.withinHypotDeadband(headingX, headingY)
+            else np.atan2(headingX, headingY)
+        )
+        return self.lastAngleScalar
+
+    def getTargetSpeedsWithHeading(
+        self,
+        xInput: float,
+        yInput: float,
+        headingX: float,
+        headingY: float,
+        currentHeadingAngle: radians,
+        maxSpeed: meters_per_second,
+    ):
+        angle: radians = (
+            self.lastAngleScalar
+            if self.withinHypotDeadband(headingX, headingY)
+            else np.atan2(headingX, headingY)
+        )
+
+        speeds: ChassisSpeeds = self.getTargetSpeedsWithAngle(
+            xInput, yInput, angle, currentHeadingAngle, maxSpeed
+        )
+
+        self.lastAngleScalar = angle
+
+        return speeds
+
+    def getRawTargetSpeedsWithHeadingVelocity(
+        self, xSpeed: meters_per_second, ySpeed: meters_per_second, omega: float
+    ) -> ChassisSpeeds:
+        if self.xLimiter is not None:
+            xSpeed = self.xLimiter.calculate(xSpeed)
+        if self.yLimiter is not None:
+            ySpeed = self.yLimiter.calculate(ySpeed)
+        if self.angleLimiter is not None:
+            omega = self.angleLimiter.calculate(omega)
+
+        return ChassisSpeeds(xSpeed, ySpeed, omega)
+
+    def getRawTargetSpeedsWithConstantHeading(
+        self,
+        xSpeed: meters_per_second,
+        ySpeed: meters_per_second,
+        targetHeadingAngle: radians,
+        currentHeadingAngle: radians,
+    ) -> ChassisSpeeds:
+        return self.getRawTargetSpeedsWithHeadingVelocity(
+            xSpeed,
+            ySpeed,
+            self.headingCalculate(currentHeadingAngle, targetHeadingAngle),
+        )
+
+    def headingCalculate(
+        self, currentHeadingAngle: radians, targetHeadingAngle: radians
+    ) -> float:
+        return (
+            self.thetaController.calculate(currentHeadingAngle, targetHeadingAngle)
+            * self.config.maxAngularVelocity
+        )
+
+    def setMaximumChassisAngularVelocity(self, angularVelocity: float) -> None:
+        self.config.maxAngularVelocity = angularVelocity
+
+
+class SwerveDrive:
+    # TODO
+    def __init__(self):
+        ...
+        # self.kinematics: Final[SwerveDrive4Kinematics]
+        # self.swerveDriveConfiguration: Final[SwerveDriveConfiguration]
+        # self.swerveDrivePoseEstimator: Final[SwerveDrive4PoseEstimator]
+        # self.imuReadingCache: Final[Cache[Rotation3d]]
+        # self.swerveModules: Final[list[SwerveModule]]
+        # self.odometryThread: Final[Notifier]
+        # self.odometryLock: Final[thrd.RLock] = thrd.RLock()
+        # self.tunerXRecommendation: Final[Alert] = Alert(
+        #     "Swerve Drive",
+        #     "Your Swerve Drive is compatible with Tuner X swerve generator, please consider using that instead of YAGSL. More information here!\n"
+        #     + "https://pro.docs.ctr-electronics.com/en/latest/docs/tuner/tuner-swerve/index.html",
+        #     Alert.AlertType.kWarning,
+        # )
