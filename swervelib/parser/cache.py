@@ -1,9 +1,11 @@
-from typing import Callable, Self
+from typing import Callable, Generic, TypeVar
 from wpilib import RobotBase, RobotController
 from wpimath.units import microseconds, milliseconds
 
+T = TypeVar("T")
 
-class Cache[T]:
+
+class Cache(Generic[T]):
     """
     Cache for frequently requested data.
     """
@@ -28,7 +30,7 @@ class Cache[T]:
         """
         return (RobotController.getFPGATime() - self.timestamp) > self.validityPeriod
 
-    def update(self) -> Self:
+    def update(self) -> "Cache[T]":
         """
         Update the cache value and timestamp.
 
@@ -38,7 +40,7 @@ class Cache[T]:
         self.timestamp = RobotController.getFPGATime()
         return self
 
-    def updateSupplier(self, supplier: Callable[[], T]) -> Self:
+    def updateSupplier(self, supplier: Callable[[], T]) -> "Cache[T]":
         """
         Update the supplier to a new source and refresh the cached value.
 
@@ -49,7 +51,7 @@ class Cache[T]:
         self.update()
         return self
 
-    def updateValidityPeriod(self, validityPeriod: milliseconds) -> Self:
+    def updateValidityPeriod(self, validityPeriod: milliseconds) -> "Cache[T]":
         """
         Update the validity period for the cached value, also updates the value.
 

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Union, Self
+from typing import Any, Optional, Union
 from wpimath.system.plant import DCMotor
 from wpimath.units import (
     volts,
@@ -28,7 +28,9 @@ class SwerveMotor(ABC):
     def clearStickyFaults(self) -> None: ...
 
     @abstractmethod
-    def setAbsoluteEncoder(self, encoder: Optional[SwerveAbsoluteEncoder]) -> Self: ...
+    def setAbsoluteEncoder(
+        self, encoder: Optional[SwerveAbsoluteEncoder]
+    ) -> "SwerveMotor": ...
 
     @abstractmethod
     def configureIntegratedEncoder(self, positionConversionFactor: float) -> None: ...
