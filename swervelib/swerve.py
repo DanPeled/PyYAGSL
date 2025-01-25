@@ -1,4 +1,5 @@
-from typing import Dict, Final, List, Optional, Tuple
+from enum import Enum
+from typing import Callable, Dict, Final, List, Optional, Tuple, Union
 import numpy as np
 from wpimath.trajectory import Trajectory
 from wpimath.filter import SlewRateLimiter
@@ -51,6 +52,9 @@ import threading as thrd
 from swervelib.simDevices import SwerveIMUSimulation, SwerveModuleSimulation
 from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity
 from swervelib.imu import SwerveIMU
+
+FloatSupplier = Callable[[], float]
+BooleanSupplier = Callable[[], bool]
 
 
 class SwerveModule:
@@ -1393,3 +1397,102 @@ class SwerveDrive:
             )
 
         return self.kinematics.toSwerveModuleStates(robotRelativeVelocity)
+
+
+class SwerveInputMode(Enum):
+    TRANSLATION_ONLY = 0
+    ANGULAR_VELOCITY = 1
+    HEADING = 2
+    AIM = 3
+
+
+class SwerveInputStream:
+    def __init__(
+        self,
+        drive: SwerveDrive,
+        x: FloatSupplier,
+        y: FloatSupplier,
+        rot: Optional[FloatSupplier] = None,
+        headingX: Optional[FloatSupplier] = None,
+        headingY: Optional[FloatSupplier] = None,
+    ) -> None:
+        self.__controllerTranslationX: Final[FloatSupplier] = x
+        self.__controllerTranslationY: Final[FloatSupplier] = y
+        self.__swerveDrive: Final[SwerveDrive] = drive
+        self.__controllerOmega: Optional[FloatSupplier] = rot
+        self.__controllerHeadingX: Optional[FloatSupplier] = headingX
+        self.__controllerHeadingY: Optional[FloatSupplier] = headingY
+
+        self.__axisDeadband: Optional[float] = None
+        self.__translationAxisScale: Optional[float] = None
+        self.__omegaAxisScale: Optional[float] = None
+        self.__aimTarget: Optional[Pose2d] = None
+        self.__headingEnabled: Optional[BooleanSupplier] = None
+        self.__lockedHeading: Optional[Rotation2d] = None
+        self.__aimEnabled: Optional[BooleanSupplier] = None
+        self.__translationOnlyEnabled: Optional[BooleanSupplier] = None
+        self.__translationCube: Optional[BooleanSupplier] = None
+        self.__omegaCube: Optional[BooleanSupplier] = None
+        self.__robotRelative: Optional[BooleanSupplier] = None
+        self.__allianceRelative: Optional[BooleanSupplier] = None
+        self.__headingOffsetEnabled: Optional[BooleanSupplier] = None
+        self.__headingOffset: Optional[Rotation2d] = None
+        self.__swerveController: SwerveController
+        self.__currentMode: SwerveInputMode = SwerveInputMode.ANGULAR_VELOCITY
+
+    @classmethod
+    def of(
+        cls, drive: SwerveDrive, x: FloatSupplier, y: FloatSupplier
+    ) -> "SwerveInputStream":
+        return SwerveInputStream(drive=drive, x=x, y=y)
+
+    def copy(self) -> "SwerveInputStream":
+        newStream: SwerveInputStream = SwerveInputStream(
+            self.__swerveDrive,
+            x=self.__controllerTranslationX,
+            y=self.__controllerTranslationY,
+        )
+        newStream.__controllerOmega = self.__controllerOmega
+        newStream.__controllerHeadingX = self.__controllerHeadingX
+        newStream.__controllerHeadingY = self.__controllerHeadingY
+        newStream.__axisDeadband = self.__axisDeadband
+        newStream.__translationAxisScale = self.__translationAxisScale
+        newStream.__omegaAxisScale = self.__omegaAxisScale
+        newStream.__aimTarget = self.__aimTarget
+        newStream.__headingEnabled = self.__headingEnabled
+        newStream.__aimEnabled = self.__aimEnabled
+        newStream.__currentMode = self.__currentMode
+        newStream.__translationOnlyEnabled = self.__translationOnlyEnabled
+        newStream.__lockedHeading = self.__lockedHeading
+        newStream.__swerveController = self.__swerveController
+        newStream.__omegaCube = self.__omegaCube
+        newStream.__translationCube = self.__translationCube
+        newStream.__robotRelative = self.__robotRelative
+        newStream.__allianceRelative = self.__allianceRelative
+        newStream.__headingOffsetEnabled = self.__headingOffsetEnabled
+        newStream.__headingOffset = self.__headingOffset
+        return newStream
+
+    def robotRelativeEnabled(
+        self, enabled: Union[BooleanSupplier, bool]
+    ) -> "SwerveInputStream":
+        if isinstance(enabled, Callable):
+            self.__robotRelative = enabled
+        elif isinstance(enabled, bool):
+            self.__robotRelative = (lambda: enabled) if enabled else None
+        return self
+
+    def headingOffsetEnabled(
+        self, enabled: Union[BooleanSupplier, bool]
+    ) -> "SwerveInputStream":
+        if isinstance(enabled, Callable):
+            self.__headingOffsetEnabled = enabled
+        elif isinstance(enabled, bool):
+            self.__headingOffsetEnabled = (lambda: enabled) if enabled else None
+        return self
+
+    def witHeadingOffset(self, angle: Rotation2d) -> "SwerveInputStream":
+        self.__headingOffset = angle
+        return self
+
+    # TODO finish chaining methods
