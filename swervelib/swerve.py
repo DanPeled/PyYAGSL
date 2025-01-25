@@ -1,23 +1,40 @@
-from typing import Final, Optional
+from typing import Dict, Final, List, Optional, Tuple
 import numpy as np
+from wpimath.trajectory import Trajectory
 from wpimath.filter import SlewRateLimiter
-from wpimath.geometry import Rotation2d, Translation2d
+from wpimath.geometry import (
+    Pose2d,
+    Rotation2d,
+    Rotation3d,
+    Transform2d,
+    Translation2d,
+    Translation3d,
+)
+from wpimath.system.plant import DCMotor
 from wpimath.units import (
     inchesToMeters,
     meters_per_second,
     degrees_per_second,
     degrees,
+    metersToInches,
     radiansToRotations,
     rotationsToDegrees,
     volts,
     radians,
+    seconds,
+    milliseconds,
+    newtons,
+    meters,
 )
 from wpimath.kinematics import (
+    SwerveDrive4Kinematics,
     SwerveModulePosition,
     SwerveModuleState,
     ChassisSpeeds,
 )
-from wpilib import Alert
+import hal as hal
+from wpimath.estimator import SwerveDrive4PoseEstimator
+from wpilib import Alert, Field2d, Notifier, RobotBase, SmartDashboard
 from wpimath.controller import PIDController, SimpleMotorFeedforwardMeters
 from ntcore import BooleanPublisher, DoublePublisher, NetworkTableInstance
 from swervelib.encoders import SwerveAbsoluteEncoder
@@ -28,9 +45,12 @@ from swervelib.parser.moduleConfig import SwerveModuleConfiguration
 from swervelib.parser.pidf import PIDFConfig
 from swervelib.parser.swerve import (
     SwerveControllerConfiguration,
+    SwerveDriveConfiguration,
 )
-from swervelib.simDevices import SwerveModuleSimulation
+import threading as thrd
+from swervelib.simDevices import SwerveIMUSimulation, SwerveModuleSimulation
 from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity
+from swervelib.imu import SwerveIMU
 
 
 class SwerveModule:
@@ -198,6 +218,17 @@ class SwerveModule:
             .getDoubleTopic(f"swerve/modules/{self.configuration.name}/Angle Setpoint")
             .publish()
         )
+
+    def getPosition(self) -> SwerveModulePosition:
+        position: float
+        azimuth: Rotation2d
+        if not SwerveDriveTelemetry.isSimulation:
+            position = self.drivePositionCache.getValue()
+            azimuth = Rotation2d.fromDegrees(self.getAbsolutePosition())
+        else:
+            return self.__simModule.getPosition()
+
+        return SwerveModulePosition(position, azimuth)
 
     def getRawAbsolutePosition(self) -> degrees:
         if SwerveDriveTelemetry.isSimulation:
@@ -381,6 +412,9 @@ class SwerveModule:
 
     def setMotorBrake(self, brake: bool) -> None:
         self.__driveMotor.setMotorBrake(brake)
+
+    def setAngleMotorConversionFactor(self, conversionFactor: float) -> None:
+        self.__angleMotor.configureIntegratedEncoder(conversionFactor)
 
     def setDriveMotorConversionFactor(self, conversionFactor: float) -> None:
         self.__driveMotor.configureIntegratedEncoder(conversionFactor)
@@ -603,18 +637,759 @@ class SwerveController:
 
 class SwerveDrive:
     # TODO
-    def __init__(self):
+    def __init__(
+        self,
+        config: SwerveDriveConfiguration,
+        controllerConfig: SwerveControllerConfiguration,
+        maxSpeed: meters_per_second,
+        startingPose: Pose2d,
+    ):
+        self.field: Field2d = Field2d()
+        self.__attainableMaxTranslationalSpeed: meters_per_second = maxSpeed
+        self.__maxChassisSpeed: meters_per_second = maxSpeed
+        self.__attainableMaxRotationalVelocity: float = np.pi * 2
+        self.swerveDriveConfiguration: Final[SwerveDriveConfiguration] = config
+        self.swerveController: SwerveController = SwerveController(controllerConfig)
+        self.kinematics: Final[SwerveDrive4Kinematics] = SwerveDrive4Kinematics(
+            *config.moduleLocations
+        )
+        self.__odometryThread: Final[Notifier] = Notifier(self.updateOdometry)
+        self.__swerveModules: Final[List[SwerveModule]] = config.modules
+
+        if RobotBase.isSimulation():
+            self.__simIMU: SwerveIMUSimulation = SwerveIMUSimulation()
+            self.imuReadingCache: Cache[Rotation3d] = Cache(
+                self.__simIMU.getGyroRotation3d, 5
+            )
+        else:
+            self.__imu: SwerveIMU = config.imu
+            self.__imu.factoryDefault()
+            self.imuReadingCache: Cache[Rotation3d] = Cache(self.__imu.getRotation3d, 5)
+
+        self.swerveDrivePoseEstimator: Final[SwerveDrive4PoseEstimator] = (
+            SwerveDrive4PoseEstimator(
+                self.kinematics, self.getYaw(), self.getModulePositions(), startingPose
+            )
+        )
+        self.zeroGyro()
+
+        if not SwerveDriveTelemetry.verbosity.value >= TelemetryVerbosity.POSE.value:
+            SmartDashboard.putData("Field", self.field)
+        if SwerveDriveTelemetry.verbosity.value >= TelemetryVerbosity.INFO.value:
+            SwerveDriveTelemetry.maxSpeed = maxSpeed
+            SwerveDriveTelemetry.maxAngularVelocity = (
+                self.swerveController.config.maxAngularVelocity
+            )
+            SwerveDriveTelemetry.moduleCount = len(self.__swerveModules)
+            SwerveDriveTelemetry.sizeFrontBack = metersToInches(
+                SwerveMath.getSwerveModuleConfig(
+                    self.__swerveModules, True, False
+                ).moduleLocation.X()
+                + SwerveMath.getSwerveModuleConfig(
+                    self.__swerveModules, False, False
+                ).moduleLocation.X()
+            )
+            SwerveDriveTelemetry.sizeLeftRight = metersToInches(
+                SwerveMath.getSwerveModuleConfig(
+                    self.__swerveModules, False, True
+                ).moduleLocation.Y()
+                + SwerveMath.getSwerveModuleConfig(
+                    self.__swerveModules, False, False
+                ).moduleLocation.Y()
+            )
+            SwerveDriveTelemetry.wheelLocations = (
+                [0.0] * SwerveDriveTelemetry.moduleCount * 2
+            )
+            for module in self.__swerveModules:
+                SwerveDriveTelemetry.wheelLocations[module.moduleNumber * 2] = (
+                    metersToInches(module.configuration.moduleLocation.X())
+                )
+                SwerveDriveTelemetry.wheelLocations[(module.moduleNumber * 2) + 1] = (
+                    metersToInches(module.configuration.moduleLocation.Y())
+                )
+
+            SwerveDriveTelemetry.measuredStates = (
+                [0.0] * SwerveDriveTelemetry.moduleCount * 2
+            )
+            SwerveDriveTelemetry.desiredStates = (
+                [0.0] * SwerveDriveTelemetry.moduleCount * 2
+            )
+            SwerveDriveTelemetry.desiredStatesObj = [
+                SwerveModuleState()
+            ] * SwerveDriveTelemetry.moduleCount
+            SwerveDriveTelemetry.measuredStatesObj = [
+                SwerveModuleState()
+            ] * SwerveDriveTelemetry.moduleCount
+
+        self.__odometryLock: Final[thrd.RLock] = thrd.RLock()
+        self.__tunerXRecommendation: Final[Alert] = Alert(
+            "Swerve Drive",
+            "Your Swerve Drive is compatible with Tuner X swerve generator, please consider using that instead of YAGSL. More information here!\n"
+            + "https://pro.docs.ctr-electronics.com/en/latest/docs/tuner/tuner-swerve/index.html",
+            Alert.AlertType.kWarning,
+        )
+        self.__rawIMUPublisher: Final[DoublePublisher] = (
+            NetworkTableInstance.getDefault()
+            .getTable("SmartDashboard")
+            .getDoubleTopic("swerve/imu/raw")
+            .publish()
+        )
+        self.__adjustedIMUPublisher: Final[DoublePublisher] = (
+            NetworkTableInstance.getDefault()
+            .getTable("SmartDashboard")
+            .getDoubleTopic("swerve/imu/adjusted")
+            .publish()
+        )
+        self.chassisVelocityCorrection: bool = True
+        self.autonomousChassisVelocityCorrection: bool = False
+        self.angularVelocityCorrection: bool = False
+        self.autonomousAngularVelocityCorrection: bool = False
+        self.angularVelcoityCoefficient: float = 0
+        self.headingCorrection: bool = False
+        self.__discretizationdt: seconds = 0.02
+        self.__moduleSynchronizationCounter: int = 0
+        self.__lastHeading: radians = 0
+        self.__HEADING_CORRECTION_DEADBAND: float = 0.01
+
+        self.setOdometryPeriod(0.004 if SwerveDriveTelemetry.isSimulation else 0.02)
+        self.checkIfTunerXCompatible()
+
+        hal.report(
+            hal.tResourceType.kResourceType_RobotDrive.value,
+            hal.tInstances.kRobotDriveSwerve_YAGSL.value,
+        )
+
+    def updateCacheValidityPeriod(
+        self, imu: milliseconds, driveMotor: milliseconds, absoluteEcnoder: milliseconds
+    ) -> None:
+        self.imuReadingCache.updateValidityPeriod(imu)
+        for module in self.__swerveModules:
+            module.drivePositionCache.updateValidityPeriod(driveMotor)
+            module.driveVelocityCache.updateValidityPeriod(driveMotor)
+            module.absolutePositionCache.updateValidityPeriod(absoluteEcnoder)
+
+    def checkIfTunerXCompatible(self) -> None:
+        # TODO: waiting for motor impls
         ...
-        # self.kinematics: Final[SwerveDrive4Kinematics]
-        # self.swerveDriveConfiguration: Final[SwerveDriveConfiguration]
-        # self.swerveDrivePoseEstimator: Final[SwerveDrive4PoseEstimator]
-        # self.imuReadingCache: Final[Cache[Rotation3d]]
-        # self.swerveModules: Final[list[SwerveModule]]
-        # self.odometryThread: Final[Notifier]
-        # self.odometryLock: Final[thrd.RLock] = thrd.RLock()
-        # self.tunerXRecommendation: Final[Alert] = Alert(
-        #     "Swerve Drive",
-        #     "Your Swerve Drive is compatible with Tuner X swerve generator, please consider using that instead of YAGSL. More information here!\n"
-        #     + "https://pro.docs.ctr-electronics.com/en/latest/docs/tuner/tuner-swerve/index.html",
-        #     Alert.AlertType.kWarning,
-        # )
+        # comaptible: bool = self.__imu is Pegion2Swerve
+        # for module in self.__swerveModules:
+        #     compatible = compatible && (module.getDriveMotor() is TalonFXSwerve && module.getAngleMotor() is TalonFXSwerve && module.getAbsoluteEncoder() is CANCoderSwerve)
+        #     if (not compatible)
+        #         break
+        #
+        # if (comaptible):
+        #     self.__tunerXRecommendation.set(True)
+        #
+
+    def setOdometryPeriod(self, period: seconds) -> None:
+        self.__odometryThread.stop()
+        self.__odometryThread.startPeriodic(period)
+
+    def stopOdometryThread(self) -> None:
+        self.__odometryThread.stop()
+
+    def setAngleMotorConversionFactor(self, conversionFactor: float) -> None:
+        for module in self.__swerveModules:
+            module.setAngleMotorConversionFactor(conversionFactor)
+
+    def setDriveMotorConversionFactor(self, conversionFactor: float) -> None:
+        for module in self.__swerveModules:
+            module.setDriveMotorConversionFactor(conversionFactor)
+
+    def getOdometryHeading(self) -> Rotation2d:
+        return self.swerveDrivePoseEstimator.getEstimatedPosition().rotation()
+
+    def setHeadingCorrecrtion(self, state: bool, deadband: Optional[float]) -> None:
+        if deadband is None:
+            deadband = self.__HEADING_CORRECTION_DEADBAND
+        self.headingCorrection = state
+        self.__HEADING_CORRECTION_DEADBAND = deadband
+
+    def driveFieldOrientedAndRobotOriented(
+        self, fieldOrientedVelocity: ChassisSpeeds, robotOrientedVelocity: ChassisSpeeds
+    ) -> None:
+        self.drive(
+            ChassisSpeeds.fromFieldRelativeSpeeds(
+                fieldOrientedVelocity, self.getOdometryHeading()
+            )
+            + robotOrientedVelocity
+        )
+
+    def driveFieldOriented(
+        self,
+        fieldRelativeSpeeds: ChassisSpeeds,
+        centerOfRotation: Optional[Translation2d],
+    ) -> None:
+        if centerOfRotation is not None:
+            self.drive(
+                ChassisSpeeds.fromFieldRelativeSpeeds(
+                    fieldRelativeSpeeds, self.getOdometryHeading()
+                ),
+                centerOfRotation,
+            )
+        else:
+            self.drive(
+                ChassisSpeeds.fromFieldRelativeSpeeds(
+                    fieldRelativeSpeeds, self.getOdometryHeading()
+                )
+            )
+
+    def drive(
+        self, velocity: ChassisSpeeds, centerOfRotation: Translation2d = Translation2d()
+    ) -> None:
+        self.driveVelocities(velocity, False, centerOfRotation)
+
+    def driveAroundControl(
+        self,
+        translation: Translation2d,
+        rotation: float,
+        fieldRelative: bool,
+        isOpenLoop: bool,
+        centerOfRotation: Translation2d,
+    ) -> None:
+        velocity: ChassisSpeeds = ChassisSpeeds(
+            translation.X(), translation.Y(), rotation
+        )
+
+        if fieldRelative:
+            velocity = ChassisSpeeds.fromFieldRelativeSpeeds(
+                velocity, self.getOdometryHeading()
+            )
+
+        self.driveVelocities(velocity, isOpenLoop, centerOfRotation)
+
+    def driveControl(
+        self,
+        translation: Translation2d,
+        rotation: float,
+        fieldRelative: bool,
+        isOpenLoop: bool,
+    ) -> None:
+        velocity: ChassisSpeeds = ChassisSpeeds(
+            translation.X(), translation.Y(), rotation
+        )
+
+        if fieldRelative:
+            velocity = ChassisSpeeds.fromFieldRelativeSpeeds(
+                velocity, self.getOdometryHeading()
+            )
+
+        self.driveVelocities(velocity, isOpenLoop, Translation2d())
+
+    def driveVelocities(
+        self,
+        robotRelativeVelocity: ChassisSpeeds,
+        isOpenLoop: bool,
+        centerOfRotation: Translation2d,
+    ) -> None:
+        SwerveDriveTelemetry.startCtrlCycle()
+        robotRelativeVelocity = self.movementOptimization(
+            robotRelativeVelocity,
+            self.chassisVelocityCorrection,
+            self.angularVelocityCorrection,
+        )
+
+        if self.headingCorrection:
+            if abs(
+                robotRelativeVelocity.omega
+            ) > self.__HEADING_CORRECTION_DEADBAND and (
+                abs(robotRelativeVelocity.vx) > self.__HEADING_CORRECTION_DEADBAND
+                or abs(robotRelativeVelocity.vy) > self.__HEADING_CORRECTION_DEADBAND
+            ):
+                robotRelativeVelocity.omega = self.swerveController.headingCalculate(
+                    self.getOdometryHeading().radians(), self.__lastHeading
+                )
+
+            else:
+                self.__lastHeading = self.getOdometryHeading().radians()
+
+        if SwerveDriveTelemetry.verbosity.value >= TelemetryVerbosity.LOW.value:
+            SwerveDriveTelemetry.desiredChassisSpeedsObj = robotRelativeVelocity
+
+        swerveModuleStates: tuple[
+            SwerveModuleState, SwerveModuleState, SwerveModuleState, SwerveModuleState
+        ] = self.kinematics.toSwerveModuleStates(
+            robotRelativeVelocity, centerOfRotation
+        )
+
+        self.setRawModuleStates(swerveModuleStates, robotRelativeVelocity, isOpenLoop)
+
+    def setMaximumAttainableSpeeds(
+        self,
+        attainableMaxTranslationalSpeed: meters_per_second,
+        attainableMaxRotationalVelocity: float,
+    ) -> None:
+        self.__attainableMaxTranslationalSpeed = attainableMaxTranslationalSpeed
+        self.__attainableMaxRotationalVelocity = attainableMaxRotationalVelocity
+
+    def setMaximumAllowableSpeeds(
+        self, maxTranslationalSpeed: meters_per_second, maxRotationalVelocity: float
+    ) -> None:
+        self.__maxChassisSpeed = maxTranslationalSpeed
+        self.swerveController.config.maxAngularVelocity = maxRotationalVelocity
+
+    def getMaximumChassisVelocity(self) -> meters_per_second:
+        return min(self.__attainableMaxTranslationalSpeed, self.__maxChassisSpeed)
+
+    def getMaximumModuleDriveVelocity(self) -> meters_per_second:
+        return self.__swerveModules[0].getMaxDriveVelocity()
+
+    def getMaximumModuleAngleVelocity(self) -> degrees_per_second:
+        return self.__swerveModules[0].getMaxAngularVelocity()
+
+    def getMaximumChassisAngularVelocity(self) -> float:
+        return min(
+            self.__attainableMaxRotationalVelocity,
+            self.swerveController.config.maxAngularVelocity,
+        )
+
+    def setRawModuleStates(
+        self,
+        desiredStates: tuple[
+            SwerveModuleState, SwerveModuleState, SwerveModuleState, SwerveModuleState
+        ],
+        desiredChassisSpeeds: ChassisSpeeds,
+        isOpenLoop: bool,
+    ) -> None:
+        maxModuleSpeed: meters_per_second = self.getMaximumModuleDriveVelocity()
+        if (
+            self.__attainableMaxTranslationalSpeed != 0
+            or self.__attainableMaxRotationalVelocity != 0
+        ) and self.__attainableMaxTranslationalSpeed != self.__maxChassisSpeed:
+            desiredStates = SwerveDrive4Kinematics.desaturateWheelSpeeds(
+                desiredStates,
+                desiredChassisSpeeds,
+                maxModuleSpeed,
+                self.__attainableMaxTranslationalSpeed,
+                self.__attainableMaxRotationalVelocity,
+            )
+        else:
+            desiredStates = SwerveDrive4Kinematics.desaturateWheelSpeeds(
+                desiredStates, maxModuleSpeed
+            )
+
+        for module in self.__swerveModules:
+            module.setDesiredState(
+                desiredStates[module.moduleNumber], isOpenLoop, False
+            )
+
+    def setModuleStates(
+        self,
+        desiredStates: tuple[
+            SwerveModuleState, SwerveModuleState, SwerveModuleState, SwerveModuleState
+        ],
+        isOpenLoop: bool,
+    ):
+        SwerveDriveTelemetry.startCtrlCycle()
+        maxModuleSpeed: meters_per_second = self.getMaximumModuleDriveVelocity()
+        desiredStates = self.kinematics.toSwerveModuleStates(
+            self.kinematics.toChassisSpeeds(desiredStates)
+        )
+        desiredStates = SwerveDrive4Kinematics.desaturateWheelSpeeds(
+            desiredStates, maxModuleSpeed
+        )
+
+        for module in self.__swerveModules:
+            module.setDesiredState(
+                desiredStates[module.moduleNumber], isOpenLoop, False
+            )
+
+    def driveFeedforward(
+        self,
+        robotRelativeVelocity: ChassisSpeeds,
+        states: tuple[
+            SwerveModuleState, SwerveModuleState, SwerveModuleState, SwerveModuleState
+        ],
+        feedforwardForces: list[newtons],
+    ) -> None:
+        SwerveDriveTelemetry.startCtrlCycle()
+        if SwerveDriveTelemetry.verbosity.value >= TelemetryVerbosity.LOW.value:
+            SwerveDriveTelemetry.desiredChassisSpeedsObj = robotRelativeVelocity
+
+        for module in self.__swerveModules:
+            driveMotorModel: DCMotor = module.configuration.driveMotor.getSimMotor()
+            driveGearRatio: float = (
+                module.configuration.conversionFactors.drive.gearRatio
+            )
+            wheelRadius: meters = (
+                inchesToMeters(module.configuration.conversionFactors.drive.diameter)
+                / 2
+            )
+
+            desiredGround: meters_per_second = states[module.moduleNumber].speed
+            feedforwardVoltage: volts = driveMotorModel.voltage(
+                feedforwardForces[module.moduleNumber] * wheelRadius / driveGearRatio,
+                desiredGround / wheelRadius * driveGearRatio,
+            )
+
+            module.applyDesiredState(
+                states[module.moduleNumber], False, feedforwardVoltage
+            )
+
+    def setChassisSpeeds(self, robotRelativeSpeeds: ChassisSpeeds) -> None:
+        SwerveDriveTelemetry.startCtrlCycle()
+        robotRelativeSpeeds = self.movementOptimization(
+            robotRelativeSpeeds,
+            self.autonomousChassisVelocityCorrection,
+            self.autonomousAngularVelocityCorrection,
+        )
+        SwerveDriveTelemetry.desiredChassisSpeedsObj = robotRelativeSpeeds
+
+        self.setRawModuleStates(
+            self.kinematics.toSwerveModuleStates(robotRelativeSpeeds),
+            robotRelativeSpeeds,
+            False,
+        )
+
+    def getPose(self) -> Pose2d:
+        poseEstimation: Pose2d = Pose2d()
+        with self.__odometryLock:
+            poseEstimation: Pose2d = (
+                self.swerveDrivePoseEstimator.getEstimatedPosition()
+            )
+
+        return poseEstimation
+
+    def getSimulatedDriveTrainPose(self) -> Pose2d:
+        return Pose2d()
+
+    def getFieldVelocity(self) -> ChassisSpeeds:
+        robotRelativeSpeeds: ChassisSpeeds = self.kinematics.toChassisSpeeds(
+            self.getStates()
+        )
+        return ChassisSpeeds.fromRobotRelativeSpeeds(
+            robotRelativeSpeeds, self.getOdometryHeading()
+        )
+
+    def getRobotVelocity(self) -> ChassisSpeeds:
+        return self.kinematics.toChassisSpeeds(self.getStates())
+
+    def resetOdometry(self, pose: Pose2d) -> None:
+        with self.__odometryLock:
+            self.swerveDrivePoseEstimator.resetPosition(
+                self.getYaw(), self.getModulePositions(), pose
+            )
+
+            if SwerveDriveTelemetry.isSimulation:
+                ...
+
+        robotRelativeSpeeds: ChassisSpeeds = ChassisSpeeds.fromRobotRelativeSpeeds(
+            ChassisSpeeds(0, 0, 0), self.getYaw()
+        )
+        self.kinematics.toSwerveModuleStates(robotRelativeSpeeds)
+
+    def postTrajectory(self, trajectory: Trajectory) -> None:
+        if SwerveDriveTelemetry.verbosity.value >= TelemetryVerbosity.POSE.value:
+            self.field.getObject("Trajectory").setTrajectory(trajectory)
+
+    def getStates(
+        self,
+    ) -> tuple[
+        SwerveModuleState, SwerveModuleState, SwerveModuleState, SwerveModuleState
+    ]:
+        states: list[SwerveModuleState] = [
+            SwerveModuleState()
+        ] * self.swerveDriveConfiguration.moduleCount
+
+        for module in self.__swerveModules:
+            states[module.moduleNumber] = module.getState()
+
+        return states[0], states[1], states[2], states[3]
+
+    def getModulePositions(
+        self,
+    ) -> Tuple[
+        SwerveModulePosition,
+        SwerveModulePosition,
+        SwerveModulePosition,
+        SwerveModulePosition,
+    ]:
+        positions: List[SwerveModulePosition] = [
+            SwerveModulePosition()
+        ] * self.swerveDriveConfiguration.moduleCount
+
+        for module in self.__swerveModules:
+            positions[module.moduleNumber] = module.getPosition()
+
+        return positions[0], positions[1], positions[2], positions[3]
+
+    def getGyro(self) -> SwerveIMU:
+        return self.swerveDriveConfiguration.imu
+
+    def setGyro(self, gyro: Rotation3d) -> None:
+        if SwerveDriveTelemetry.isSimulation:
+            self.setGyroOffset(self.__simIMU.getGyroRotation3d() - gyro)
+        else:
+            self.setGyroOffset(self.__imu.getRawRotation3d() - gyro)
+
+        self.imuReadingCache.update()
+
+    def zeroGyro(self) -> None:
+        if SwerveDriveTelemetry.isSimulation:
+            self.__simIMU.setAngle(0)
+        else:
+            self.setGyroOffset(self.__imu.getRawRotation3d())
+
+        self.imuReadingCache.update()
+        self.swerveController.lastAngleScalar = 0
+        self.__lastHeading = 0
+        self.resetOdometry(Pose2d(self.getPose().translation(), Rotation2d()))
+
+    def getYaw(self) -> Rotation2d:
+        return Rotation2d(self.imuReadingCache.getValue().Z())
+
+    def getPitch(self) -> Rotation2d:
+        return Rotation2d(self.imuReadingCache.getValue().Y())
+
+    def getRoll(self) -> Rotation2d:
+        return Rotation2d(self.imuReadingCache.getValue().X())
+
+    def getRotation3d(self) -> Rotation3d:
+        return self.imuReadingCache.getValue()
+
+    def getAccel(self) -> Optional[Translation3d]:
+        if SwerveDriveTelemetry.isSimulation:
+            return self.__simIMU.getAccel()
+        else:
+            return self.__imu.getAccel()
+
+    def setMotorIdleMode(self, brake: bool) -> None:
+        for module in self.__swerveModules:
+            module.setMotorBrake(brake)
+
+    def setModuleEncoderAutoSynchronize(self, enabled: bool, deadband: degrees) -> None:
+        for module in self.__swerveModules:
+            module.setEncoderAutoSynchronize(enabled, deadband)
+
+    def lockPose(self) -> None:
+        for module in self.__swerveModules:
+            desiredState: SwerveModuleState = SwerveModuleState(
+                0, module.configuration.moduleLocation.angle()
+            )
+            if SwerveDriveTelemetry.verbosity.value >= TelemetryVerbosity.INFO.value:
+                SwerveDriveTelemetry.desiredStatesObj[module.moduleNumber] = (
+                    desiredState
+                )
+
+            module.setDesiredState(desiredState, False, True)
+
+        self.kinematics.toSwerveModuleStates(ChassisSpeeds())
+
+    def getSwerveModulePoses(self, robotPose: Pose2d) -> List[Pose2d]:
+        poses: List[Pose2d] = []
+
+        for module in self.__swerveModules:
+            poses.append(
+                robotPose
+                + Transform2d(
+                    module.configuration.moduleLocation, module.getState().angle
+                )
+            )
+
+        return poses
+
+    def replaceSwerveModuleFeedforward(
+        self, driveFeedforward: SimpleMotorFeedforwardMeters
+    ) -> None:
+        for module in self.__swerveModules:
+            module.setFeedForward(driveFeedforward)
+
+    def updateOdometry(self) -> None:
+        SwerveDriveTelemetry.startOdomCycle()
+        self.__odometryLock.acquire()
+        try:
+            self.swerveDrivePoseEstimator.update(
+                self.getYaw(), self.getModulePositions()
+            )
+
+            if SwerveDriveTelemetry.isSimulation:
+                ...
+            if SwerveDriveTelemetry.verbosity.value >= TelemetryVerbosity.INFO.value:
+                SwerveDriveTelemetry.measuredChassisSpeedsObj = self.getRobotVelocity()
+                SwerveDriveTelemetry.robotRotationObj = self.getOdometryHeading()
+
+            if SwerveDriveTelemetry.verbosity.value >= TelemetryVerbosity.POSE.value:
+                if SwerveDriveTelemetry.isSimulation:
+                    ...
+                else:
+                    self.field.setRobotPose(
+                        self.swerveDrivePoseEstimator.getEstimatedPosition()
+                    )
+
+            sumVelocity: float = 0
+            for module in self.__swerveModules:
+                moduleState: SwerveModuleState = module.getState()
+                sumVelocity += abs(moduleState.speed)
+
+                if (
+                    SwerveDriveTelemetry.verbosity.value
+                    == TelemetryVerbosity.HIGH.value
+                ):
+                    module.updateTelemetry()
+                    self.__rawIMUPublisher.set(self.getYaw().degrees())
+                    self.__adjustedIMUPublisher.set(self.getOdometryHeading().degrees())
+
+                if (
+                    SwerveDriveTelemetry.verbosity.value
+                    >= TelemetryVerbosity.INFO.value
+                ):
+                    SwerveDriveTelemetry.measuredStatesObj[module.moduleNumber] = (
+                        moduleState
+                    )
+
+            self.__moduleSynchronizationCounter += 1
+            if sumVelocity <= 0.01 and self.__moduleSynchronizationCounter > 5:
+                self.synchronizeModuleEncoders()
+                self.__moduleSynchronizationCounter = 0
+
+            if SwerveDriveTelemetry.verbosity.value >= TelemetryVerbosity.INFO.value:
+                SwerveDriveTelemetry.updateData()
+
+        except Exception as e:
+            self.__odometryLock.release()
+            raise e
+
+        self.__odometryLock.release()
+        SwerveDriveTelemetry.endOdomCycle()
+
+    def invalidateCache(self) -> None:
+        self.imuReadingCache.update()
+        for module in self.__swerveModules:
+            module.invalidateCache()
+
+    def synchronizeModuleEncoders(self) -> None:
+        for module in self.__swerveModules:
+            module.queueSynchronizeEncoders()
+
+    def setGyroOffset(self, offset: Rotation3d) -> None:
+        if SwerveDriveTelemetry.isSimulation:
+            self.__simIMU.setAngle(offset.Z())
+        else:
+            self.__imu.setOffset(offset)
+
+        self.imuReadingCache.update()
+
+    def addVisionMeasurement(
+        self,
+        robotPose: Pose2d,
+        timestamp: seconds,
+        visionMeasurementStdDevs: Optional[tuple[float, float, float]] = None,
+    ) -> None:
+        with self.__odometryLock:
+            if visionMeasurementStdDevs is not None:
+                self.swerveDrivePoseEstimator.addVisionMeasurement(
+                    robotPose, timestamp, visionMeasurementStdDevs
+                )
+            else:
+                self.swerveDrivePoseEstimator.addVisionMeasurement(robotPose, timestamp)
+
+    def setVisionMeasurementStdDevs(
+        self, visionMeasurementStdDevs: tuple[float, float, float]
+    ) -> None:
+        with self.__odometryLock:
+            self.swerveDrivePoseEstimator.setVisionMeasurementStdDevs(
+                visionMeasurementStdDevs
+            )
+
+    def getSwerveController(self) -> SwerveController:
+        return self.swerveController
+
+    def getModules(self) -> List[SwerveModule]:
+        return self.swerveDriveConfiguration.modules
+
+    def getModuleMap(self) -> Dict[str, SwerveModule]:
+        moduleMap: Dict[str, SwerveModule] = {}
+        for module in self.__swerveModules:
+            moduleMap[module.configuration.name] = module
+        return moduleMap
+
+    def resetDriveEncoders(self) -> None:
+        for module in self.__swerveModules:
+            module.getDriveMotor().setPosition(0)
+
+    def pushOffsetsToEncoders(self) -> None:
+        for module in self.__swerveModules:
+            module.pushOffsetsToEncoders()
+
+    def restoreInternalOffset(self) -> None:
+        for module in self.__swerveModules:
+            module.restoreInternalOffset()
+
+    def setAutoCenteringModules(self, enabled: bool) -> None:
+        for module in self.__swerveModules:
+            module.setAntiJitter(not enabled)
+
+    def setCosineCompensator(self, enabled: bool) -> None:
+        for module in self.__swerveModules:
+            module.configuration.useCosineCompensator = enabled
+
+    def setChassisDiscretization(self, enable: bool, dt: seconds) -> None:
+        if not SwerveDriveTelemetry.isSimulation:
+            self.chassisVelocityCorrection = enable
+            self.__discretizationdt = dt
+
+    def setChassisDiscretizationForMode(
+        self, useInTeleop: bool, useInAuto: bool, dt: seconds
+    ) -> None:
+        if not SwerveDriveTelemetry.isSimulation:
+            self.chassisVelocityCorrection = useInTeleop
+            self.autonomousChassisVelocityCorrection = useInAuto
+            self.__discretizationdt = dt
+
+    def setAngularVelocityCompensation(
+        self, useInTeleop: bool, useInAuto: bool, angularVelocityCoeff: float
+    ) -> None:
+        if not SwerveDriveTelemetry.isSimulation:
+            self.angularVelcoityCoefficient = angularVelocityCoeff
+            self.autonomousAngularVelocityCorrection = useInAuto
+            self.angularVelocityCorrection = useInTeleop
+
+    def angularVelocitySkewCorrection(
+        self, robotRelativeVelocity: ChassisSpeeds
+    ) -> ChassisSpeeds:
+        angularVelocity: Rotation2d = Rotation2d(
+            self.__imu.getYawAngularVelocity() * self.angularVelcoityCoefficient
+        )
+        if angularVelocity.radians() != 0.0:
+            fieldRelativeVelocity: ChassisSpeeds = (
+                ChassisSpeeds.fromRobotRelativeSpeeds(
+                    robotRelativeVelocity, self.getOdometryHeading()
+                )
+            )
+            robotRelativeVelocity = ChassisSpeeds.fromFieldRelativeSpeeds(
+                fieldRelativeVelocity, self.getOdometryHeading() + angularVelocity
+            )
+
+        return robotRelativeVelocity
+
+    def movementOptimization(
+        self,
+        robotRelativeVelocity: ChassisSpeeds,
+        useChassisDiscretize: bool,
+        useAngularVelocitySkewCorrection: bool,
+    ) -> ChassisSpeeds:
+        if useAngularVelocitySkewCorrection:
+            robotRelativeVelocity = self.angularVelocitySkewCorrection(
+                robotRelativeVelocity
+            )
+
+        if useChassisDiscretize:
+            robotRelativeVelocity = ChassisSpeeds.discretize(
+                robotRelativeVelocity, self.__discretizationdt
+            )
+
+        return robotRelativeVelocity
+
+    def toSwerveModuleStates(
+        self, robotRelativeVelocity: ChassisSpeeds, optimize: bool
+    ) -> tuple[
+        SwerveModuleState, SwerveModuleState, SwerveModuleState, SwerveModuleState
+    ]:
+        if optimize:
+            robotRelativeVelocity = self.movementOptimization(
+                robotRelativeVelocity,
+                self.chassisVelocityCorrection,
+                self.angularVelocityCorrection,
+            )
+
+        return self.kinematics.toSwerveModuleStates(robotRelativeVelocity)
