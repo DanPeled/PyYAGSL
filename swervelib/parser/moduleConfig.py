@@ -1,19 +1,22 @@
 from typing import Final, Optional
+
 from wpimath.geometry import Translation2d
 from wpimath.units import (
     amperes,
-    seconds,
-    volts,
+    degrees,
+    inches,
+    inchesToMeters,
     kilogram_square_meters,
     kilograms,
     meters,
-    degrees,
+    seconds,
+    volts,
 )
-from swervelib.parser.pidf import PIDFConfig
-from swervelib.motors import SwerveMotor
+
 from swervelib.encoders import SwerveAbsoluteEncoder
 from swervelib.math import SwerveMath
-from wpimath.units import inches, inchesToMeters
+from swervelib.motors import SwerveMotor
+from swervelib.parser.pidf import PIDFConfig
 
 
 class AngleConversionFactorsJson:

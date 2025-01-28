@@ -1,12 +1,14 @@
 from typing import Optional
+
+from wpilib import Field2d
 from wpimath.geometry import Pose2d, Rotation2d, Rotation3d, Translation3d
 from wpimath.kinematics import (
     SwerveDrive4Kinematics,
     SwerveModulePosition,
     SwerveModuleState,
 )
-from wpilib import Field2d
 from wpimath.units import radians, volts
+
 from swervelib.parser.moduleConfig import SwerveModulePhysicalCharacteristics
 
 

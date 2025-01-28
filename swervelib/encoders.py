@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any
+
 from wpimath.units import degrees, degrees_per_second
 
 

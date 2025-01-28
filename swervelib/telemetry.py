@@ -1,17 +1,16 @@
 from enum import Enum
 from typing import Final
-from ntcore._ntcore import StringPublisher
-from wpilib import Alert, DriverStation
+
 from ntcore import (
-    DoublePublisher,
     DoubleArrayPublisher,
+    DoublePublisher,
     NetworkTableInstance,
     StructPublisher,
 )
-from wpilib import RobotBase
+from ntcore._ntcore import StringPublisher
+from wpilib import Alert, DriverStation, RobotBase, Timer
 from wpimath.geometry import Rotation2d
 from wpimath.kinematics import ChassisSpeeds, SwerveModuleState
-from wpilib import Timer
 
 
 class TelemetryVerbosity(Enum):

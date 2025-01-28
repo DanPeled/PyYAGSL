@@ -1,7 +1,13 @@
+import threading as thrd
 from enum import Enum
 from typing import Callable, Dict, Final, List, Optional, Tuple, Union
+
+import hal as hal
 import numpy as np
-from wpimath.trajectory import Trajectory
+from ntcore import BooleanPublisher, DoublePublisher, NetworkTableInstance
+from wpilib import Alert, Field2d, Notifier, RobotBase, SmartDashboard
+from wpimath.controller import PIDController, SimpleMotorFeedforwardMeters
+from wpimath.estimator import SwerveDrive4PoseEstimator
 from wpimath.filter import SlewRateLimiter
 from wpimath.geometry import (
     Pose2d,
@@ -11,34 +17,32 @@ from wpimath.geometry import (
     Translation2d,
     Translation3d,
 )
-from wpimath.system.plant import DCMotor
-from wpimath.units import (
-    inchesToMeters,
-    meters_per_second,
-    degrees_per_second,
-    degrees,
-    metersToInches,
-    radiansToRotations,
-    rotationsToDegrees,
-    volts,
-    radians,
-    seconds,
-    milliseconds,
-    newtons,
-    meters,
-)
 from wpimath.kinematics import (
+    ChassisSpeeds,
     SwerveDrive4Kinematics,
     SwerveModulePosition,
     SwerveModuleState,
-    ChassisSpeeds,
 )
-import hal as hal
-from wpimath.estimator import SwerveDrive4PoseEstimator
-from wpilib import Alert, Field2d, Notifier, RobotBase, SmartDashboard
-from wpimath.controller import PIDController, SimpleMotorFeedforwardMeters
-from ntcore import BooleanPublisher, DoublePublisher, NetworkTableInstance
+from wpimath.system.plant import DCMotor
+from wpimath.trajectory import Trajectory
+from wpimath.units import (
+    degrees,
+    degrees_per_second,
+    inchesToMeters,
+    meters,
+    meters_per_second,
+    metersToInches,
+    milliseconds,
+    newtons,
+    radians,
+    radiansToRotations,
+    rotationsToDegrees,
+    seconds,
+    volts,
+)
+
 from swervelib.encoders import SwerveAbsoluteEncoder
+from swervelib.imu import SwerveIMU
 from swervelib.math import SwerveMath
 from swervelib.motors import SwerveMotor
 from swervelib.parser.cache import Cache
@@ -48,10 +52,8 @@ from swervelib.parser.swerve import (
     SwerveControllerConfiguration,
     SwerveDriveConfiguration,
 )
-import threading as thrd
 from swervelib.simDevices import SwerveIMUSimulation, SwerveModuleSimulation
 from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity
-from swervelib.imu import SwerveIMU
 
 FloatSupplier = Callable[[], float]
 BooleanSupplier = Callable[[], bool]

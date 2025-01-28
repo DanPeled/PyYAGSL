@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
+
 from wpimath.geometry import Rotation3d, Translation3d
 from wpimath.units import degrees_per_second
 

@@ -1,25 +1,20 @@
 from typing import Final, Optional
-from wpimath.geometry import (
-    Pose2d,
-    Rotation2d,
-    Translation2d,
-    Translation3d,
-    Twist2d,
-)
+
+import numpy as np
+from wpimath.controller import SimpleMotorFeedforwardMeters
+from wpimath.geometry import Pose2d, Rotation2d, Translation2d, Translation3d, Twist2d
 from wpimath.kinematics import ChassisSpeeds, SwerveModuleState
 from wpimath.units import (
+    degrees,
     kilograms,
     meters,
-    degrees,
-    volts,
     meters_per_second,
     meters_per_second_squared,
     newton_meters,
     radians,
     seconds,
+    volts,
 )
-from wpimath.controller import SimpleMotorFeedforwardMeters
-import numpy as np
 
 from swervelib.parser.moduleConfig import SwerveModuleConfiguration
 from swervelib.parser.swerve import SwerveDriveConfiguration

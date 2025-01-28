@@ -1,14 +1,15 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Union
+
 from wpimath.system.plant import DCMotor
 from wpimath.units import (
-    volts,
-    meters_per_second,
-    degrees_per_second,
-    degrees,
-    meters,
     amperes,
+    degrees,
+    degrees_per_second,
+    meters,
+    meters_per_second,
     seconds,
+    volts,
 )
 
 from swervelib.encoders import SwerveAbsoluteEncoder

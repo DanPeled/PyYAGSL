@@ -1,14 +1,16 @@
 from typing import Final
+
 from wpimath.geometry import Translation2d
 from wpimath.system.plant import DCMotor
-from wpimath.units import meters_per_second, meters
+from wpimath.units import meters, meters_per_second
+
+from swervelib.imu import SwerveIMU
 from swervelib.math import SwerveMath
 from swervelib.parser.moduleConfig import (
     SwerveModuleConfiguration,
     SwerveModulePhysicalCharacteristics,
 )
 from swervelib.parser.pidf import PIDFConfig
-from swervelib.imu import SwerveIMU
 from swervelib.swerve import SwerveModule
 
 

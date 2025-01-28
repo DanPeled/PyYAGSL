@@ -1,4 +1,5 @@
 from typing import Callable, Generic, TypeVar
+
 from wpilib import RobotBase, RobotController
 from wpimath.units import microseconds, milliseconds
 
