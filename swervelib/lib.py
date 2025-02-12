@@ -1,10 +1,40 @@
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Callable, Dict, Final, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Final,
+    List,
+    Optional,
+    Self,
+    Tuple,
+    Union,
+    override,
+)
 import threading as thrd
 from ntcore import BooleanPublisher, DoublePublisher, NetworkTableInstance
 import numpy as np
-from wpilib import Alert, Field2d, Notifier, RobotBase, SmartDashboard
+from rev import (
+    ClosedLoopConfig,
+    REVLibError,
+    RelativeEncoder,
+    SparkBase,
+    SparkClosedLoopController,
+    SparkLowLevel,
+    SparkMax,
+    SparkMaxConfig,
+)
+import time
+from wpilib import (
+    Alert,
+    DriverStation,
+    Field2d,
+    Notifier,
+    RobotBase,
+    SmartDashboard,
+    reportWarning,
+)
 from wpimath.controller import SimpleMotorFeedforwardMeters
 from wpimath.estimator import SwerveDrive4PoseEstimator
 from wpimath.filter import SlewRateLimiter
@@ -53,6 +83,8 @@ from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity
 
 FloatSupplier = Callable[[], float]
 BooleanSupplier = Callable[[], bool]
+
+# region internal
 
 
 class AngleConversionFactorsJson:
@@ -226,7 +258,13 @@ class SwerveMotor(ABC):
     def factoryDefaults(self) -> None: ...
 
     @abstractmethod
+    def close(self) -> None: ...
+
+    @abstractmethod
     def clearStickyFaults(self) -> None: ...
+
+    @abstractmethod
+    def usingExternalFeedbackSensor(self) -> bool: ...
 
     @abstractmethod
     def setAbsoluteEncoder(
@@ -2142,3 +2180,128 @@ class SwerveIMUSimulation:
         field.getObject("XModules").setPoses(modulePoses)
 
     def setAngle(self, angle: radians) -> None: ...
+
+
+# endregion internal
+
+
+# region vendor motors
+class SparkMaxSwerve(SwerveMotor):
+    from rev import SparkMax
+
+    def __init__(self, motor: SparkMax, isDriveMotor: bool, motorType: DCMotor):
+        self.__motor: Final[SparkMax] = motor
+        self.__configDelay: Final[seconds] = 5 / 1000
+        self.__isDriveMotor = isDriveMotor
+        self.__cfg: SparkMaxConfig = SparkMaxConfig()
+        self.simMotor = motorType
+
+        self.factoryDefaults()
+        self.clearStickyFaults()
+
+        self.encoder: RelativeEncoder = motor.getEncoder()
+        self.pid: SparkClosedLoopController = motor.getClosedLoopController()
+
+        self.__cfg.closedLoop.setFeedbackSensor(
+            ClosedLoopConfig.FeedbackSensor.kPrimaryEncoder
+        )  # Configure feedback of the PID controller as the integrated encoder.
+
+        self.__absoluteEncoder: Optional[SwerveAbsoluteEncoder] = None
+        self.__velocity: FloatSupplier = self.encoder.getVelocity
+        self.__position: FloatSupplier = self.encoder.getPosition
+        # Spin off configurations in a different thread.
+        # configureSparkMax(() -> motor.setCANTimeout(0)); # Commented out because it prevents feedback.
+
+    @classmethod
+    def fromId(cls, id: int, isDriveMotor: bool, motorType: DCMotor) -> Self:
+        return cls(
+            SparkMax(id, SparkLowLevel.MotorType.kBrushless), isDriveMotor, motorType
+        )
+
+    def configureSparkMax(self, config: Callable[[], REVLibError]) -> None:
+        for i in range(self.maximumRetries):
+            if config() == REVLibError.kOk:
+                return
+            time.sleep(self.__configDelay)
+
+        reportWarning(f"Failure configuring motor {self.__motor.getDeviceId()}")
+
+    @override
+    def close(self) -> None: ...
+
+    def getConfig(self) -> SparkMaxConfig:
+        return self.__cfg
+
+    def updateConfig(self, cfgGiven: SparkMaxConfig) -> None:
+        if not DriverStation.isDisabled():
+            raise RuntimeError(
+                "Configuration changes cannot be applied while the robot is enabled."
+            )
+        else:
+            self.__cfg.apply(cfgGiven)
+            self.configureSparkMax(
+                lambda: self.__motor.configure(
+                    self.__cfg,
+                    SparkBase.ResetMode.kNoResetSafeParameters,
+                    SparkBase.PersistMode.kPersistParameters,
+                )
+            )
+
+    @override
+    def setCurrentLimit(self, currentLimit: amperes) -> None:
+        self.__cfg.smartCurrentLimit(int(currentLimit))
+
+    @override
+    def setLoopRampRate(self, rampRate: seconds) -> None:
+        self.__cfg.closedLoopRampRate(rampRate).openLoopRampRate(rampRate)
+
+    @override
+    def getMotor(self) -> Any:
+        return self.__motor
+
+    @override
+    def getSimMotor(self) -> DCMotor:
+        if self.simMotor is None:
+            self.simMotor = DCMotor.NEO(1)
+        return self.simMotor
+
+    @override
+    def usingExternalFeedbackSensor(self) -> bool:
+        return self.__absoluteEncoder is not None
+
+    @override
+    def factoryDefaults(self) -> None:
+        # Do nothing
+        ...
+
+    @override
+    def clearStickyFaults(self) -> None:
+        self.configureSparkMax(self.__motor.clearFaults)
+
+    def setAbsoluteEncoder(
+        self, encoder: Optional[SwerveAbsoluteEncoder]
+    ) -> SwerveMotor:
+        if self.encoder is None:
+            self.__absoluteEncoder = None
+            self.__cfg.closedLoop.setFeedbackSensor(
+                ClosedLoopConfig.FeedbackSensor.kPrimaryEncoder
+            )
+
+            self.__velocity = self.encoder.getVelocity
+            self.__position = self.encoder.getPosition
+        # TODO:
+        # else if (encoder instanceof SparkMaxAnalogEncoderSwerve || encoder instanceof SparkMaxEncoderSwerve)
+        # {
+        #   cfg.closedLoop.feedbackSensor(encoder instanceof SparkMaxAnalogEncoderSwerve
+        #                                 ? FeedbackSensor.kAnalogSensor : FeedbackSensor.kAbsoluteEncoder);
+
+        #   this.absoluteEncoder = Optional.of(encoder);
+        #   velocity = this.absoluteEncoder.get()::getVelocity;
+        #   position = this.absoluteEncoder.get()::getAbsolutePosition;
+        # }
+        return self
+
+    # TODO continue from configureIntegratedEncoder
+
+
+# endregion vendor motors
