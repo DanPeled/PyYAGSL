@@ -48,9 +48,7 @@ from wpimath.units import (
 )
 from wpimath.system.plant import DCMotor
 from swervelib.cache import Cache
-from swervelib.imu import SwerveIMU
 from wpimath.controller import PIDController
-from swervelib.encoders import SwerveAbsoluteEncoder
 from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity
 
 FloatSupplier = Callable[[], float]
@@ -160,6 +158,62 @@ class SwerveModulePhysicalCharacteristics:
         if conversionFactors is not None:
             if conversionFactors.isAngleEmpty() and conversionFactors.isDriveEmpty():
                 self.conversionFactors = None
+
+
+class SwerveIMU(ABC):
+    @abstractmethod
+    def factoryDefault(self) -> None: ...
+
+    @abstractmethod
+    def clearStickyFaults(self) -> None: ...
+
+    @abstractmethod
+    def setOffset(self, offset: Rotation3d) -> None: ...
+
+    @abstractmethod
+    def setInverted(self, invertIMU: bool) -> None: ...
+
+    @abstractmethod
+    def getRawRotation3d(self) -> Rotation3d: ...
+
+    @abstractmethod
+    def getRotation3d(self) -> Rotation3d: ...
+
+    @abstractmethod
+    def getAccel(self) -> Optional[Translation3d]: ...
+
+    @abstractmethod
+    def getYawAngularVelocity(self) -> degrees_per_second: ...
+
+    @abstractmethod
+    def getIMU(self) -> Any: ...
+
+
+class SwerveAbsoluteEncoder(ABC):
+    def __init__(self):
+        self.maximumRetries: int = 5
+        self.readingError: bool = False
+
+    @abstractmethod
+    def factoryDefault(self) -> None: ...
+
+    @abstractmethod
+    def clearStickyFaults(self) -> None: ...
+
+    @abstractmethod
+    def configure(self, inverted: bool) -> None: ...
+
+    @abstractmethod
+    def getAbsolutePosition(self) -> degrees: ...
+
+    @abstractmethod
+    def getAbsoluteEncoder(self) -> Any: ...
+
+    @abstractmethod
+    def setAbsoluteEncoderOffset(self, offset: float) -> bool: ...
+
+    @abstractmethod
+    def getVelocity(self) -> degrees_per_second: ...
 
 
 class SwerveMotor(ABC):
