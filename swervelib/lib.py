@@ -1,12 +1,11 @@
-import threading as thrd
+from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Callable, Dict, Final, List, Optional, Tuple, Union
-
-import hal as hal
-import numpy as np
+from typing import Any, Callable, Dict, Final, List, Optional, Tuple, Union
+import threading as thrd
 from ntcore import BooleanPublisher, DoublePublisher, NetworkTableInstance
+import numpy as np
 from wpilib import Alert, Field2d, Notifier, RobotBase, SmartDashboard
-from wpimath.controller import PIDController, SimpleMotorFeedforwardMeters
+from wpimath.controller import SimpleMotorFeedforwardMeters
 from wpimath.estimator import SwerveDrive4PoseEstimator
 from wpimath.filter import SlewRateLimiter
 from wpimath.geometry import (
@@ -16,6 +15,7 @@ from wpimath.geometry import (
     Transform2d,
     Translation2d,
     Translation3d,
+    Twist2d,
 )
 from wpimath.kinematics import (
     ChassisSpeeds,
@@ -23,45 +23,248 @@ from wpimath.kinematics import (
     SwerveModulePosition,
     SwerveModuleState,
 )
-from wpimath.system.plant import DCMotor
+import hal as hal
 from wpimath.trajectory import Trajectory
 from wpimath.units import (
-    degrees,
-    degrees_per_second,
-    inchesToMeters,
-    meters,
-    meters_per_second,
-    metersToInches,
-    milliseconds,
-    newtons,
-    radians,
     radiansToRotations,
     rotationsToDegrees,
+    metersToInches,
+    milliseconds,
+    degrees_per_second,
+    inchesToMeters,
+    inches,
+    amperes,
+    kilogram_square_meters,
+    degrees,
+    kilograms,
+    meters,
+    meters_per_second,
+    meters_per_second_squared,
+    newton_meters,
+    radians,
     seconds,
     volts,
+    newtons,
 )
-
-from swervelib.encoders import SwerveAbsoluteEncoder
-from swervelib.imu import SwerveIMU
-from swervelib.math import SwerveMath
-from swervelib.motors import SwerveMotor
+from wpimath.system.plant import DCMotor
 from swervelib.cache import Cache
-from swervelib.parser import (
-    PIDFConfig,
-    SwerveControllerConfiguration,
-    SwerveDriveConfiguration,
-    SwerveModuleConfiguration,
-)
-from swervelib.simDevices import SwerveIMUSimulation, SwerveModuleSimulation
+from swervelib.imu import SwerveIMU
+from wpimath.controller import PIDController
+from swervelib.encoders import SwerveAbsoluteEncoder
 from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity
 
 FloatSupplier = Callable[[], float]
 BooleanSupplier = Callable[[], bool]
 
 
+class AngleConversionFactorsJson:
+    def __init__(self):
+        self.gearRatio: float
+        self.factor: float = 0
+
+    def calculate(self) -> float:
+        if self.factor == 0:
+            self.factor = SwerveMath.calculateDegreesPerSteeringRotation(self.gearRatio)
+        return self.factor
+
+
+class DriveConversionFactorsJson:
+    def __init__(self):
+        self.gearRatio: float
+        self.diameter: inches
+        self.factor: float = 0
+
+    def calculate(self) -> float:
+        if self.factor == 0:
+            self.factor = SwerveMath.calculateMetersPerRotation(
+                inchesToMeters(self.diameter), self.gearRatio
+            )
+
+        return self.factor
+
+
+class ConversionFactorsJson:
+    def __init__(self):
+        self.drive: DriveConversionFactorsJson = DriveConversionFactorsJson()
+        self.angle: AngleConversionFactorsJson = AngleConversionFactorsJson()
+
+    def isDriveEmpty(self) -> bool:
+        self.drive.calculate()
+        return self.drive.factor == 0
+
+    def isAngleEmpty(self) -> bool:
+        self.angle.calculate()
+        return self.angle.factor == 0
+
+    def works(self) -> bool:
+        return (self.angle.factor != 0 and self.drive.factor != 0) or (
+            self.drive.gearRatio != 0
+            and self.drive.diameter != 0
+            and (self.angle.gearRatio != 0)
+        )
+
+
+class PIDFConfig:
+    def __init__(
+        self, p: float = 0, i: float = 0, d: float = 0, f: float = 0, iz: float = 0
+    ):
+        self.p: float = p
+        self.i: float = i
+        self.d: float = d
+        self.f: float = f
+        self.iz: float = iz
+        self.output: PIDFRange = PIDFRange()
+
+    def createPIDController(self) -> PIDController:
+        return PIDController(self.p, self.i, self.d)
+
+
+class PIDFRange:
+    def __init__(self):
+        self.min: float = -1
+        self.max: float = -1
+
+
+class SwerveModulePhysicalCharacteristics:
+    def __init__(
+        self,
+        conversionFactors: Optional[ConversionFactorsJson],
+        driveMotorRampRate: seconds,
+        angleMotorRampRate: seconds,
+        wheelGripCoefficientOfFriction: float = 1.19,
+        optimalVoltage: volts = 12,
+        driveMotorCurrentLimit: amperes = 40,
+        angleMotorCurrentLimit: amperes = 20,
+        driveFrictionVoltage: volts = 0.2,
+        angleFrictionVoltage: volts = 0.3,
+        steerRotationalInertia: kilogram_square_meters = 0.03,
+        robotMass: kilograms = 50,
+    ):
+        self.driveMotorCurrentLimit: Final[amperes] = driveMotorCurrentLimit
+        self.angleMotorCurrentLimit: Final[amperes] = angleMotorCurrentLimit
+        self.driveMotorRampRate: Final[seconds] = driveMotorRampRate
+        self.angleMotorRampRate: Final[seconds] = angleMotorRampRate
+        self.driveFrictionVoltage: Final[volts] = driveFrictionVoltage
+        self.angleFrictionVoltage: Final[volts] = angleFrictionVoltage
+        self.wheelGripCoefficientOfFriction: Final[float] = (
+            wheelGripCoefficientOfFriction
+        )
+        self.steerRotationalInertia: Final[kilogram_square_meters] = (
+            steerRotationalInertia
+        )
+        self.robotMass: Final[kilograms] = robotMass
+        self.optimalVoltage: volts = optimalVoltage
+
+        self.conversionFactors: Optional[ConversionFactorsJson] = conversionFactors
+
+        if conversionFactors is not None:
+            if conversionFactors.isAngleEmpty() and conversionFactors.isDriveEmpty():
+                self.conversionFactors = None
+
+
+class SwerveMotor(ABC):
+    def __init__(self):
+        self.maximumRetries: int = 5
+        self.simMotor: DCMotor
+        self.__isDriveMotor: bool
+
+    @abstractmethod
+    def factoryDefaults(self) -> None: ...
+
+    @abstractmethod
+    def clearStickyFaults(self) -> None: ...
+
+    @abstractmethod
+    def setAbsoluteEncoder(
+        self, encoder: Optional[SwerveAbsoluteEncoder]
+    ) -> "SwerveMotor": ...
+
+    @abstractmethod
+    def configureIntegratedEncoder(self, positionConversionFactor: float) -> None: ...
+
+    @abstractmethod
+    def configurePIDF(self, config: PIDFConfig) -> None: ...
+
+    @abstractmethod
+    def configurePIDWrapping(self, minInput: float, maxOutput: float) -> None: ...
+
+    @abstractmethod
+    def setMotorBrake(self, isBrakeMode: bool) -> None: ...
+
+    @abstractmethod
+    def setInverted(self, inverted: bool) -> None: ...
+
+    @abstractmethod
+    def burnFlash(self) -> None: ...
+
+    @abstractmethod
+    def set(self, precentOutput: float) -> None: ...
+
+    @abstractmethod
+    def setReference(
+        self, setpoint: float, feedforward: float, position=-1
+    ) -> None: ...
+
+    @abstractmethod
+    def getVoltage(self) -> volts: ...
+
+    @abstractmethod
+    def setVoltage(self, voltage: volts) -> None: ...
+
+    @abstractmethod
+    def getAppliedOutput(self) -> float: ...
+
+    @abstractmethod
+    def getVelocity(self) -> Union[meters_per_second, degrees_per_second]: ...
+
+    @abstractmethod
+    def getPosition(self) -> Union[meters, degrees]: ...
+
+    @abstractmethod
+    def setPosition(self, position: Union[meters, degrees]) -> None: ...
+
+    @abstractmethod
+    def setVoltageCompensation(self, minimalVoltage: volts) -> None: ...
+
+    @abstractmethod
+    def setCurrentLimit(self, currentLimit: amperes) -> None: ...
+
+    @abstractmethod
+    def setLoopRampRate(self, rampRate: seconds) -> None: ...
+
+    @abstractmethod
+    def getMotor(self) -> Any: ...
+
+    @abstractmethod
+    def getSimMotor(self) -> DCMotor: ...
+
+    @abstractmethod
+    def isAttachedAbsoluteEncoder(self) -> bool: ...
+
+
+class SwerveModuleSimulation:
+    # TODO Implement actual Module Sim
+    def configureSimModule(
+        self,
+        physicalCharacteristics: SwerveModulePhysicalCharacteristics,
+    ) -> None: ...
+
+    def updateStateAndPosition(self, desiredState: SwerveModuleState) -> None: ...
+
+    def runDriveMotorCharacterization(
+        self, desiredFacing: Rotation2d, suppliedVolts: volts
+    ) -> None: ...
+
+    def runAngleMotorCharacterization(self, suppliedVolts: volts) -> None: ...
+
+    def getPosition(self) -> SwerveModulePosition: ...
+
+    def getState(self) -> SwerveModuleState: ...
+
+
 class SwerveModule:
     def __init__(
-        self, moduleNumber: int, moduleConfiguration: SwerveModuleConfiguration
+        self, moduleNumber: int, moduleConfiguration: "SwerveModuleConfiguration"
     ) -> None:
         self.__maxDriveVelocity: meters_per_second
         self.__maxAngularVelocity: degrees_per_second
@@ -434,7 +637,7 @@ class SwerveModule:
     def getAbsoluteEncoder(self) -> SwerveAbsoluteEncoder:
         return self.__absoluteEncoder
 
-    def getConfiguration(self) -> SwerveModuleConfiguration:
+    def getConfiguration(self) -> "SwerveModuleConfiguration":
         return self.configuration
 
     def pushOffsetsToEncoders(self) -> None:
@@ -535,7 +738,7 @@ class SwerveModule:
 
 
 class SwerveController:
-    def __init__(self, cfg: SwerveControllerConfiguration):
+    def __init__(self, cfg: "SwerveControllerConfiguration"):
         self.config: Final[SwerveControllerConfiguration] = cfg
         self.thetaController: Final[PIDController] = (
             cfg.headingPIDF.createPIDController()
@@ -645,8 +848,8 @@ class SwerveDrive:
     # TODO
     def __init__(
         self,
-        config: SwerveDriveConfiguration,
-        controllerConfig: SwerveControllerConfiguration,
+        config: "SwerveDriveConfiguration",
+        controllerConfig: "SwerveControllerConfiguration",
         maxSpeed: meters_per_second,
         startingPose: Pose2d,
     ):
@@ -1498,3 +1701,391 @@ class SwerveInputStream:
         return self
 
     # TODO finish chaining methods
+
+
+class BoolMotorJson:
+    def __init__(self):
+        self.driveInverted: bool
+        self.angleInverted: bool
+
+
+class LocationJson:
+    def __init__(self) -> None:
+        self.front: float = 0
+        self.x: float = 0
+        self.left: float = 0
+        self.y: float = 0
+
+
+class SwerveModuleConfiguration:
+    def __init__(
+        self,
+        driveMotor: SwerveMotor,
+        angleMotor: SwerveMotor,
+        conversionFactors: ConversionFactorsJson,
+        absoluteEncoder: SwerveAbsoluteEncoder,
+        angleOffset: degrees,
+        x: meters,
+        y: meters,
+        anglePIDF: PIDFConfig,
+        velocityPIDF: PIDFConfig,
+        physicalCharacteristics: SwerveModulePhysicalCharacteristics,
+        name: str,
+        useCosineCompensator: bool,
+        absoluteEncoderInverted: bool = False,
+        driveMotorInverted: bool = False,
+        angleMotorInverted: bool = False,
+    ):
+        self.conversionFactors: Final[ConversionFactorsJson] = conversionFactors
+        self.angleOffset: Final[degrees] = angleOffset
+        self.absoluteEncoderInverted: Final[bool] = absoluteEncoderInverted
+        self.driveMotorInverted: Final[bool] = driveMotorInverted
+        self.angleMotorInverted: Final[bool] = angleMotorInverted
+        self.anglePIDF: PIDFConfig = anglePIDF
+        self.velocityPIDF: PIDFConfig = velocityPIDF
+        self.moduleLocation: Translation2d = Translation2d(x, y)
+        self.physicalCharacteristics: SwerveModulePhysicalCharacteristics = (
+            physicalCharacteristics
+        )
+        self.driveMotor: SwerveMotor = driveMotor
+        self.angleMotor: SwerveMotor = angleMotor
+        self.absoluteEncoder: SwerveAbsoluteEncoder = absoluteEncoder
+        self.name: str = name
+        self.useCosineCompensator: bool = useCosineCompensator
+
+
+class ControllerPropertiesJson:
+    def __init__(self):
+        self.angleJoystickRadiusDeadband: float
+        self.headingPIDF: PIDFConfig
+
+
+class SwerveDriveConfiguration:
+    def __init__(
+        self,
+        moduleConfigs: list[SwerveModuleConfiguration],
+        swerveIMU: SwerveIMU,
+        invertedIMU: bool,
+        physicalCharacteristics: SwerveModulePhysicalCharacteristics,
+    ):
+        self.moduleCount: Final[int] = len(moduleConfigs)
+        self.imu: SwerveIMU = swerveIMU
+        self.imu.setInverted(invertedIMU)
+        self.modules: list[SwerveModule]
+        self.moduleLocations: list[Translation2d] = [Translation2d()] * len(
+            moduleConfigs
+        )
+        for module in self.modules:
+            self.moduleLocations[module.moduleNumber] = (
+                module.configuration.moduleLocation
+            )
+        self.physicalCharacteristics: SwerveModulePhysicalCharacteristics = (
+            physicalCharacteristics
+        )
+
+    def createModules(
+        self, swerves: list[SwerveModuleConfiguration]
+    ) -> list[SwerveModule]:
+        modList: list[SwerveModule] = []
+
+        for i in range(len(swerves)):
+            modList.insert(i, SwerveModule(i, swerves[i]))
+
+        return modList
+
+    def getDriveBaseRadius(self) -> meters:
+        centerOfModules: Translation2d = self.moduleLocations[0]
+
+        for i in range(1, len(self.moduleLocations)):
+            centerOfModules += self.moduleLocations[i]
+
+        return centerOfModules.distance(self.moduleLocations[0])
+
+    def getTrackWidth(self) -> meters:
+        fr: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+            self.modules, True, False
+        )
+        fl: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+            self.modules, True, True
+        )
+
+        return fr.moduleLocation.distance(fl.moduleLocation)
+
+    def getTrackLength(self) -> meters:
+        br: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+            self.modules, False, False
+        )
+        bl: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+            self.modules, False, True
+        )
+
+        return br.moduleLocation.distance(bl.moduleLocation)
+
+    def getDriveMotorSim(self) -> DCMotor:
+        fl = SwerveMath.getSwerveModuleConfig(self.modules, True, True)
+        return fl.driveMotor.getSimMotor()
+
+    def getAngleMotorSim(self) -> DCMotor:
+        fl = SwerveMath.getSwerveModuleConfig(self.modules, True, True)
+        return fl.angleMotor.getSimMotor()
+
+
+class SwerveControllerConfiguration:
+    def __init__(
+        self,
+        driveCfg: SwerveDriveConfiguration,
+        headingPIDF: PIDFConfig,
+        maxSpeed: meters_per_second,
+        angleJoystickRadiusDeadband: float = 0.5,
+    ):
+        self.maxAngularVelocity: float = SwerveMath.calculateMaxAngularVelocity(
+            maxSpeed,
+            abs(driveCfg.moduleLocations[0].X()),
+            abs(driveCfg.moduleLocations[0].Y()),
+        )
+
+        self.headingPIDF: Final[PIDFConfig] = headingPIDF
+        self.angleJoystickRadiusDeadband: Final[float] = angleJoystickRadiusDeadband
+
+
+class Matter:
+    def __init__(self, position: Translation3d, mass: kilograms):
+        self.position: Translation3d = position
+        self.mass: kilograms = mass
+
+    def massMoment(self) -> Translation3d:
+        return self.position * self.mass
+
+
+class SwerveMath:
+    @staticmethod
+    def calculateMetersPerRotation(
+        wheelDiameter: meters, driveGearRatio: float, pulsePerRotation: float = 1
+    ) -> meters:
+        return (np.pi * wheelDiameter) / (driveGearRatio * pulsePerRotation)
+
+    @staticmethod
+    def normalizeAngle(angle: degrees) -> degrees:
+        angleRotation = Rotation2d.fromDegrees(angle)
+        return Rotation2d(angleRotation.cos(), angleRotation.sin()).degrees()
+
+    @staticmethod
+    def applyDeadband(value: float, scaled: bool, deadband: float) -> float:
+        value = value if np.abs(value) > deadband else 0
+        return (
+            1 / (1 - deadband) * (np.abs(value) - deadband) * np.sign(value)
+            if scaled
+            else value
+        )
+
+    @staticmethod
+    def calculateDegreesPerSteeringRotation(
+        angleGearRatio: float, pulsePerRotation: float = 1
+    ) -> degrees:
+        return 360 / (angleGearRatio * pulsePerRotation)
+
+    @staticmethod
+    def createDriveFeedForward(
+        optimalVoltage: volts,
+        maxSpeed: meters_per_second,
+        wheelGripCoefficientOfFriction: float,
+    ) -> SimpleMotorFeedforwardMeters:
+        kv: float = optimalVoltage / maxSpeed
+        # ka: float = optimalVoltage / SwerveMath.calculateMaxAcceleration(
+        #     wheelGripCoefficientOfFriction
+        # )
+
+        return SimpleMotorFeedforwardMeters(0, kv, 0)
+
+    @staticmethod
+    def calculateMaxAngularVelocity(
+        maxSpeed: meters_per_second, furthestModuleX: meters, furthestModuleY: meters
+    ) -> float:
+        return maxSpeed / (np.hypot(furthestModuleX, furthestModuleY))
+
+    @staticmethod
+    def calculateMaxAcceleration(cof: float) -> float:
+        return cof * 9.81
+
+    @staticmethod
+    def calculateMaxRobotAcceleration(
+        stallTorqueNm: newton_meters,
+        gearRatio: float,
+        moduleCount: int,
+        wheelDiameter: meters,
+        robotMass: kilograms,
+    ) -> meters_per_second_squared:
+        return (stallTorqueNm * gearRatio * moduleCount) / (
+            (wheelDiameter / 2) * robotMass
+        )
+
+    @staticmethod
+    def calcMaxTippingAccel(
+        angle: Rotation2d, matter: list[Matter], robotMass: kilograms, config
+    ):
+        centerMass: Translation3d = Translation3d()
+        for obj in matter:
+            centerMass += obj.massMoment()
+        robotCG: Translation3d = centerMass / robotMass
+        horizontalCG: Translation2d = robotCG.toTranslation2d()
+
+        projectedHorizontalCg: Translation2d = Translation2d(
+            (angle.sin() * angle.cos() * horizontalCG.Y())
+            + ((angle.cos() ** 2) * horizontalCG.X()),
+            (angle.sin() * angle.cos() * horizontalCG.X())
+            + ((angle.sin() ** 2) * horizontalCG.Y()),
+        )
+
+        # Projects the edge of the wheelbase onto the direction line.  Assumes the wheelbase is
+        # rectangular.
+        # Because a line is being projected, rather than a point, one of the coordinates of the
+        # projected point is
+        # already known.
+        projectedWheelbaseEdge: Optional[Translation2d] = None
+        angDeg: degrees = angle.degrees()
+        if 45 >= angDeg >= -45:
+            conf: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+                config.modules, True, True
+            )
+            projectedWheelbaseEdge = Translation2d(
+                conf.moduleLocation.X(), conf.moduleLocation.X() * angle.tan()
+            )
+        elif 135 >= angDeg > 45:
+            conf: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+                config.modules, True, True
+            )
+            projectedWheelbaseEdge = Translation2d(
+                conf.moduleLocation.Y() / angle.tan(), conf.moduleLocation.Y()
+            )
+        elif -135 <= angDeg < -45:
+            conf: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+                config.modules, True, False
+            )
+            projectedWheelbaseEdge = Translation2d(
+                conf.moduleLocation.Y() / angle.tan(), conf.moduleLocation.Y()
+            )
+        else:
+            conf: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+                config.modules, False, True
+            )
+            projectedWheelbaseEdge = Translation2d(
+                conf.moduleLocation.X(), conf.moduleLocation.X() * angle.tan()
+            )
+        horizontalDistance: float = (
+            projectedHorizontalCg + projectedWheelbaseEdge
+        ).norm()
+
+        return 9.81 * horizontalDistance / robotCG.Z()
+
+    @staticmethod
+    def poseLog(transform: Pose2d) -> Twist2d:
+        kEps: Final[float] = 1e-9
+        dtheta: Final[radians] = transform.rotation().radians()
+        half_dtheta: Final[radians] = dtheta * 0.5
+        cos_minus_one: Final[float] = transform.rotation().cos() - 1.0
+        halftheta_by_tan_of_halfdtheta: float
+
+        if np.abs(cos_minus_one) < kEps:
+            halftheta_by_tan_of_halfdtheta = 1.0 - (1.0 / 12.0 * dtheta * dtheta)
+        else:
+            halftheta_by_tan_of_halfdtheta = (
+                -(half_dtheta * transform.rotation().sin()) / cos_minus_one
+            )
+        translation_part: Final[Translation2d] = transform.translation().rotateBy(
+            Rotation2d(halftheta_by_tan_of_halfdtheta, -half_dtheta)
+        )
+
+        return Twist2d(translation_part.X(), translation_part.Y(), dtheta)
+
+    @staticmethod
+    def limitVelocity(
+        commandedVelocity: Translation2d,
+        fieldVelocity: ChassisSpeeds,
+        robotPose: Pose2d,
+        loopTime: seconds,
+        robotMass: kilograms,
+        matter: list[Matter],
+        config: SwerveDriveConfiguration,
+    ) -> Translation2d: ...  # TODO waiting for SwerveController class
+
+    @staticmethod
+    def getSwerveModuleConfig(
+        modules: list[SwerveModule], front: bool, left: bool
+    ) -> SwerveModuleConfiguration:
+        target: Translation2d = modules[0].configuration.moduleLocation
+        current: Translation2d
+        temp: Translation2d
+        configuration: SwerveModuleConfiguration = modules[0].configuration
+
+        for module in modules:
+            current = module.configuration.moduleLocation
+            if front:
+                temp = current if target.Y() >= current.Y() else target
+            else:
+                temp = current if target.Y() <= current.Y() else target
+
+            if left:
+                target = temp if target.X() >= temp.X() else target
+            else:
+                target = temp if target.X() <= temp.X() else target
+
+            configuration = module.configuration if current == target else configuration
+
+        return configuration
+
+    @staticmethod
+    def placeInAppropriate0To360Scope(
+        scopeReference: degrees, newAngle: degrees
+    ) -> degrees:
+        diffRevs: degrees = np.round((scopeReference - newAngle) / 360) * 360
+        return diffRevs + newAngle
+
+    @staticmethod
+    def antiJitter(
+        moduleState: SwerveModuleState,
+        lastModuleState: SwerveModuleState,
+        maxSpeed: float,
+    ) -> None:
+        if np.abs(moduleState.speed) <= (maxSpeed * 0.01):
+            moduleState.angle = lastModuleState.angle
+
+    @staticmethod
+    def cubeTranslation(translation: Translation2d) -> Translation2d:
+        if np.hypot(translation.X(), translation.Y()) <= 1.0e-6:
+            return translation
+        return Translation2d(translation.norm() ** 3, translation.angle())
+
+    @staticmethod
+    def scaleTranslation(translation: Translation2d, scalar: float) -> Translation2d:
+        if np.hypot(translation.X(), translation.Y()) <= 1.0e-6:
+            return translation
+        return Translation2d(translation.norm() * scalar, translation.angle())
+
+
+class SwerveIMUSimulation:
+    # TODO implement actual sim IMU
+    def getYaw(self) -> Rotation2d:
+        return Rotation2d()
+
+    def getPitch(self) -> Rotation2d:
+        return Rotation2d()
+
+    def getRoll(self) -> Rotation2d:
+        return Rotation2d()
+
+    def getGyroRotation3d(self) -> Rotation3d:
+        return Rotation3d(0, 0, self.getYaw().radians())
+
+    def getAccel(self) -> Optional[Translation3d]:
+        return None
+
+    def updateOdometry(
+        self,
+        kinematics: SwerveDrive4Kinematics,
+        states: list[SwerveModuleState],
+        modulePoses: list[Pose2d],
+        field: Field2d,
+    ) -> None:
+        field.getObject("XModules").setPoses(modulePoses)
+
+    def setAngle(self, angle: radians) -> None: ...
