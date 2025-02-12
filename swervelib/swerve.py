@@ -45,12 +45,12 @@ from swervelib.encoders import SwerveAbsoluteEncoder
 from swervelib.imu import SwerveIMU
 from swervelib.math import SwerveMath
 from swervelib.motors import SwerveMotor
-from swervelib.parser.cache import Cache
-from swervelib.parser.moduleConfig import SwerveModuleConfiguration
-from swervelib.parser.pidf import PIDFConfig
-from swervelib.parser.swerve import (
+from swervelib.cache import Cache
+from swervelib.parser import (
+    PIDFConfig,
     SwerveControllerConfiguration,
     SwerveDriveConfiguration,
+    SwerveModuleConfiguration,
 )
 from swervelib.simDevices import SwerveIMUSimulation, SwerveModuleSimulation
 from swervelib.telemetry import SwerveDriveTelemetry, TelemetryVerbosity

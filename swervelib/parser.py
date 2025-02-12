@@ -1,22 +1,45 @@
 from typing import Final, Optional
-
 from wpimath.geometry import Translation2d
+from wpimath.system.plant import DCMotor
 from wpimath.units import (
+    meters,
+    meters_per_second,
+    inchesToMeters,
+    inches,
     amperes,
     degrees,
-    inches,
-    inchesToMeters,
     kilogram_square_meters,
     kilograms,
-    meters,
     seconds,
     volts,
 )
-
-from swervelib.encoders import SwerveAbsoluteEncoder
+from swervelib.imu import SwerveIMU
 from swervelib.math import SwerveMath
+from swervelib.swerve import SwerveModule
+from wpimath.controller import PIDController
+from swervelib.encoders import SwerveAbsoluteEncoder
 from swervelib.motors import SwerveMotor
-from swervelib.parser.pidf import PIDFConfig
+
+
+class PIDFConfig:
+    def __init__(
+        self, p: float = 0, i: float = 0, d: float = 0, f: float = 0, iz: float = 0
+    ):
+        self.p: float = p
+        self.i: float = i
+        self.d: float = d
+        self.f: float = f
+        self.iz: float = iz
+        self.output: PIDFRange = PIDFRange()
+
+    def createPIDController(self) -> PIDController:
+        return PIDController(self.p, self.i, self.d)
+
+
+class PIDFRange:
+    def __init__(self):
+        self.min: float = -1
+        self.max: float = -1
 
 
 class AngleConversionFactorsJson:
@@ -152,3 +175,97 @@ class SwerveModuleConfiguration:
         self.absoluteEncoder: SwerveAbsoluteEncoder = absoluteEncoder
         self.name: str = name
         self.useCosineCompensator: bool = useCosineCompensator
+
+
+class ControllerPropertiesJson:
+    def __init__(self):
+        self.angleJoystickRadiusDeadband: float
+        self.headingPIDF: PIDFConfig
+
+
+class SwerveDriveConfiguration:
+    def __init__(
+        self,
+        moduleConfigs: list[SwerveModuleConfiguration],
+        swerveIMU: SwerveIMU,
+        invertedIMU: bool,
+        physicalCharacteristics: SwerveModulePhysicalCharacteristics,
+    ):
+        self.moduleCount: Final[int] = len(moduleConfigs)
+        self.imu: SwerveIMU = swerveIMU
+        self.imu.setInverted(invertedIMU)
+        self.modules: list[SwerveModule]
+        self.moduleLocations: list[Translation2d] = [Translation2d()] * len(
+            moduleConfigs
+        )
+        for module in self.modules:
+            self.moduleLocations[module.moduleNumber] = (
+                module.configuration.moduleLocation
+            )
+        self.physicalCharacteristics: SwerveModulePhysicalCharacteristics = (
+            physicalCharacteristics
+        )
+
+    def createModules(
+        self, swerves: list[SwerveModuleConfiguration]
+    ) -> list[SwerveModule]:
+        modList: list[SwerveModule] = []
+
+        for i in range(len(swerves)):
+            modList.insert(i, SwerveModule(i, swerves[i]))
+
+        return modList
+
+    def getDriveBaseRadius(self) -> meters:
+        centerOfModules: Translation2d = self.moduleLocations[0]
+
+        for i in range(1, len(self.moduleLocations)):
+            centerOfModules += self.moduleLocations[i]
+
+        return centerOfModules.distance(self.moduleLocations[0])
+
+    def getTrackWidth(self) -> meters:
+        fr: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+            self.modules, True, False
+        )
+        fl: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+            self.modules, True, True
+        )
+
+        return fr.moduleLocation.distance(fl.moduleLocation)
+
+    def getTrackLength(self) -> meters:
+        br: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+            self.modules, False, False
+        )
+        bl: SwerveModuleConfiguration = SwerveMath.getSwerveModuleConfig(
+            self.modules, False, True
+        )
+
+        return br.moduleLocation.distance(bl.moduleLocation)
+
+    def getDriveMotorSim(self) -> DCMotor:
+        fl = SwerveMath.getSwerveModuleConfig(self.modules, True, True)
+        return fl.driveMotor.getSimMotor()
+
+    def getAngleMotorSim(self) -> DCMotor:
+        fl = SwerveMath.getSwerveModuleConfig(self.modules, True, True)
+        return fl.angleMotor.getSimMotor()
+
+
+class SwerveControllerConfiguration:
+    def __init__(
+        self,
+        driveCfg: SwerveDriveConfiguration,
+        headingPIDF: PIDFConfig,
+        maxSpeed: meters_per_second,
+        angleJoystickRadiusDeadband: float = 0.5,
+    ):
+        self.maxAngularVelocity: float = SwerveMath.calculateMaxAngularVelocity(
+            maxSpeed,
+            abs(driveCfg.moduleLocations[0].X()),
+            abs(driveCfg.moduleLocations[0].Y()),
+        )
+
+        self.headingPIDF: Final[PIDFConfig] = headingPIDF
+        self.angleJoystickRadiusDeadband: Final[float] = angleJoystickRadiusDeadband

@@ -9,7 +9,7 @@ from wpimath.kinematics import (
 )
 from wpimath.units import radians, volts
 
-from swervelib.parser.moduleConfig import SwerveModulePhysicalCharacteristics
+from swervelib.parser import SwerveModulePhysicalCharacteristics
 
 
 class SwerveIMUSimulation:

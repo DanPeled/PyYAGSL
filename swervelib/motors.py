@@ -13,7 +13,7 @@ from wpimath.units import (
 )
 
 from swervelib.encoders import SwerveAbsoluteEncoder
-from swervelib.parser.pidf import PIDFConfig
+from swervelib.parser import PIDFConfig
 
 
 class SwerveMotor(ABC):

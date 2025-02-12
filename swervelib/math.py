@@ -15,9 +15,7 @@ from wpimath.units import (
     seconds,
     volts,
 )
-
-from swervelib.parser.moduleConfig import SwerveModuleConfiguration
-from swervelib.parser.swerve import SwerveDriveConfiguration
+from swervelib.parser import SwerveDriveConfiguration, SwerveModuleConfiguration
 from swervelib.swerve import SwerveModule
 
 
