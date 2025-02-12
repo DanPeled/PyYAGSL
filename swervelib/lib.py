@@ -899,7 +899,6 @@ class SwerveController:
 
 
 class SwerveDrive:
-    # TODO
     def __init__(
         self,
         config: "SwerveDriveConfiguration",
