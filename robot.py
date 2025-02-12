@@ -1,6 +1,5 @@
 import wpimath.units
 from wpilib import TimedRobot
-import swervelib.lib
 
 
 class Robot(TimedRobot):
